@@ -13,7 +13,7 @@ import (
 // Validate block
 
 func validateBlock(state State, block *types.Block) error {
-	if block.Height == 20-1 || block.Height == 300000-1 || block.Height == 2626745-1 {
+	if block.Height == 20-1 || block.Height == 10000-1 || block.Height == 2626745-1 {
 		return nil
 	}
 	// Validate internal consistency.
