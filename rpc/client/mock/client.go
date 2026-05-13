@@ -25,6 +25,7 @@ import (
 	ctypes "github.com/cometbft/cometbft/rpc/core/types"
 	rpctypes "github.com/cometbft/cometbft/rpc/jsonrpc/types"
 	"github.com/cometbft/cometbft/types"
+	"github.com/cometbft/cometbft/votepool"
 )
 
 // Client wraps arbitrary implementations of the various interfaces.
@@ -180,4 +181,12 @@ func (c Client) Validators(_ context.Context, height *int64, page, perPage *int)
 
 func (c Client) BroadcastEvidence(_ context.Context, ev types.Evidence) (*ctypes.ResultBroadcastEvidence, error) {
 	return c.env.BroadcastEvidence(&rpctypes.Context{}, ev)
+}
+
+func (c Client) BroadcastVote(_ context.Context, _ votepool.Vote) (*ctypes.ResultBroadcastVote, error) {
+	return nil, nil
+}
+
+func (c Client) QueryVote(_ context.Context, _ int, _ []byte) (*ctypes.ResultQueryVote, error) {
+	return &ctypes.ResultQueryVote{}, nil
 }

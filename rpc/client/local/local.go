@@ -15,6 +15,7 @@ import (
 	ctypes "github.com/cometbft/cometbft/rpc/core/types"
 	rpctypes "github.com/cometbft/cometbft/rpc/jsonrpc/types"
 	"github.com/cometbft/cometbft/types"
+	"github.com/cometbft/cometbft/votepool"
 )
 
 /*
@@ -210,6 +211,14 @@ func (c *Local) BlockSearch(
 
 func (c *Local) BroadcastEvidence(_ context.Context, ev types.Evidence) (*ctypes.ResultBroadcastEvidence, error) {
 	return c.env.BroadcastEvidence(c.ctx, ev)
+}
+
+func (c *Local) BroadcastVote(_ context.Context, _ votepool.Vote) (*ctypes.ResultBroadcastVote, error) {
+	return nil, fmt.Errorf("broadcast vote is not supported by this cometbft version")
+}
+
+func (c *Local) QueryVote(_ context.Context, _ int, _ []byte) (*ctypes.ResultQueryVote, error) {
+	return nil, fmt.Errorf("query vote is not supported by this cometbft version")
 }
 
 func (c *Local) Subscribe(

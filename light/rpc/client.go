@@ -17,6 +17,7 @@ import (
 	rpctypes "github.com/cometbft/cometbft/rpc/jsonrpc/types"
 	"github.com/cometbft/cometbft/state"
 	"github.com/cometbft/cometbft/types"
+	"github.com/cometbft/cometbft/votepool"
 )
 
 var errNegOrZeroHeight = errors.New("negative or zero height")
@@ -544,6 +545,14 @@ func (c *Client) Validators(
 
 func (c *Client) BroadcastEvidence(ctx context.Context, ev types.Evidence) (*ctypes.ResultBroadcastEvidence, error) {
 	return c.next.BroadcastEvidence(ctx, ev)
+}
+
+func (c *Client) BroadcastVote(ctx context.Context, vote votepool.Vote) (*ctypes.ResultBroadcastVote, error) {
+	return c.next.BroadcastVote(ctx, vote)
+}
+
+func (c *Client) QueryVote(ctx context.Context, eventType int, eventHash []byte) (*ctypes.ResultQueryVote, error) {
+	return c.next.QueryVote(ctx, eventType, eventHash)
 }
 
 func (c *Client) Subscribe(ctx context.Context, subscriber, query string,
