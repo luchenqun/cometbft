@@ -27,6 +27,7 @@ import (
 	"github.com/cometbft/cometbft/libs/service"
 	ctypes "github.com/cometbft/cometbft/rpc/core/types"
 	"github.com/cometbft/cometbft/types"
+	"github.com/cometbft/cometbft/votepool"
 )
 
 // Client wraps most important rpc calls a client would make if you want to
@@ -41,6 +42,7 @@ type Client interface {
 	StatusClient
 	EvidenceClient
 	MempoolClient
+	VotepoolClient
 }
 
 // ABCIClient groups together the functionality that principally affects the
@@ -143,6 +145,12 @@ type MempoolClient interface {
 // behavior.
 type EvidenceClient interface {
 	BroadcastEvidence(context.Context, types.Evidence) (*ctypes.ResultBroadcastEvidence, error)
+}
+
+// VotepoolClient is kept as a narrow compatibility shim for downstream code.
+type VotepoolClient interface {
+	BroadcastVote(ctx context.Context, vote votepool.Vote) (*ctypes.ResultBroadcastVote, error)
+	QueryVote(ctx context.Context, eventType int, eventHash []byte) (*ctypes.ResultQueryVote, error)
 }
 
 // RemoteClient is a Client, which can also return the remote network address.

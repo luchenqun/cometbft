@@ -41,7 +41,9 @@ proxy_app = "tcp://127.0.0.1:26658"
 moniker = "anonymous"
 
 # Database backend: goleveldb | cleveldb | boltdb | rocksdb | badgerdb
-# * goleveldb (github.com/syndtr/goleveldb - most popular implementation)
+# * goleveldb (github.com/syndtr/goleveldb)
+#   - UNMAINTAINED
+#   - stable
 #   - pure go
 #   - stable
 # * cleveldb (uses levigo wrapper)
@@ -187,6 +189,16 @@ experimental_close_on_slow_client = false
 # See https://github.com/tendermint/tendermint/issues/3435
 timeout_broadcast_tx_commit = "10s"
 
+# Maximum number of requests that can be sent in a JSON-RPC batch request.
+# Possible values: number greater than 0.
+# If the number of requests sent in a JSON-RPC batch exceed the maximum batch
+# size configured, an error will be returned.
+# The default value is set to `10`, which will limit the number of requests
+# to 10 requests per a JSON-RPC batch request.
+# If you don't want to enforce a maximum number of requests for a batch
+# request set this value to `0`.
+max_request_batch_size = 10
+
 # Maximum size of request body, in bytes
 max_body_bytes = 1000000
 
@@ -285,6 +297,16 @@ dial_timeout = "3s"
 #######################################################
 [mempool]
 
+# The type of mempool for this node to use.
+#
+#  Possible types:
+#  - "flood" : concurrent linked list mempool with flooding gossip protocol
+#  (default)
+#  - "nop"   : nop-mempool (short for no operation; the ABCI app is responsible
+#  for storing, disseminating and proposing txs). "create_empty_blocks=false" is
+#  not supported.
+type = "flood"
+
 # Recheck (default: true) defines whether CometBFT should recheck the
 # validity for all remaining transaction in the mempool after a block.
 # Since a block affects the application state, some transactions in the
@@ -365,6 +387,9 @@ chunk_request_timeout = "10s"
 
 # The number of concurrent chunk fetchers to run (default: 1).
 chunk_fetchers = "4"
+
+# Maximum number of chunks allowed in a snapshot (default: 100000).
+max_snapshot_chunks = 100000
 
 #######################################################
 ###       Block Sync Configuration Options          ###
@@ -478,6 +503,7 @@ namespace = "cometbft"
  ```
 
 ## Empty blocks VS no empty blocks
+
 ### create_empty_blocks = true
 
 If `create_empty_blocks` is set to `true` in your config, blocks will be created ~ every second (with default consensus parameters). You can regulate the delay between blocks by changing the `timeout_commit`. E.g. `timeout_commit = "10s"` should result in ~ 10 second blocks.
@@ -491,6 +517,7 @@ Note after the block H, CometBFT creates something we call a "proof block" (only
 Plus, if you set `create_empty_blocks_interval` to something other than the default (`0`), CometBFT will be creating empty blocks even in the absence of transactions every `create_empty_blocks_interval.` For instance, with `create_empty_blocks = false` and `create_empty_blocks_interval = "30s"`, CometBFT will only create blocks if there are transactions, or after waiting 30 seconds without receiving any transactions.
 
 ## Consensus timeouts explained
+
 There's a variety of information about timeouts in [Running in
 production](./running-in-production.md#configuration-parameters).
 You can also find more detailed explanation in the paper describing
@@ -509,18 +536,88 @@ timeout_precommit = "1s"
 timeout_precommit_delta = "500ms"
 timeout_commit = "1s"
 ```
+
 Note that in a successful round, the only timeout that we absolutely wait no
 matter what is `timeout_commit`.
 Here's a brief summary of the timeouts:
-- `timeout_propose` = how long we wait for a proposal block before prevoting nil
-- `timeout_propose_delta` = how much  `timeout_propose` increases with each round
-- `timeout_prevote` = how long we wait after receiving +2/3 prevotes for
+
+- `timeout_propose` = how long a validator should wait for a proposal block before prevoting nil
+- `timeout_propose_delta` = how much `timeout_propose` increases with each round
+- `timeout_prevote` = how long a validator should wait after receiving +2/3 prevotes for
   anything (ie. not a single block or nil)
 - `timeout_prevote_delta` = how much the `timeout_prevote` increases with each round
-- `timeout_precommit` = how long we wait after receiving +2/3 precommits for
+- `timeout_precommit` = how long a validator should wait after receiving +2/3 precommits for
   anything (ie. not a single block or nil)
 - `timeout_precommit_delta` = how much the `timeout_precommit` increases with each round
-- `timeout_commit` = how long we wait after committing a block, before starting
+- `timeout_commit` = how long a validator should wait after committing a block, before starting
   on the new height (this gives us a chance to receive some more precommits,
   even though we already have +2/3)
 
+### The adverse effect of using inconsistent `timeout_propose` in a network
+
+Here's an interesting question. What happens if a particular validator sets a
+very small `timeout_propose`, as compared to the rest of the network?
+
+Imagine there are only two validators in your network: Alice and Bob. Bob sets
+`timeout_propose` to 0s. Alice uses the default value of 3s. Let's say they
+both have an equal voting power. Given the proposer selection algorithm is a
+weighted round-robin, you may expect Alice and Bob to take turns proposing
+blocks, and the result like:
+
+```
+#1 block - Alice
+#2 block - Bob
+#3 block - Alice
+#4 block - Bob
+...
+```
+
+What happens in reality is, however, a little bit different:
+
+```
+#1 block - Bob
+#2 block - Bob
+#3 block - Bob
+#4 block - Bob
+```
+
+That's because Bob doesn't wait for a proposal from Alice (prevotes `nil`).
+This leaves Alice no chances to commit a block. Note that every block Bob
+creates needs a vote from Alice to constitute 2/3+. Bob always gets one because
+Alice has `timeout_propose` set to 3s. Alice never gets one because Bob has it
+set to 0s.
+
+Imagine now there are ten geographically distributed validators. One of them
+(Bob) sets `timeout_propose` to 0s. Others have it set to 3s. Now, Bob won't be
+able to move with his own speed because it still needs 2/3 votes of the other
+validators and it takes time to propagate those. I.e., the network moves with
+the speed of time to accumulate 2/3+ of votes (prevotes & precommits), not with
+the speed of the fastest proposer.
+
+> Isn't block production determined by voting power?
+
+If it were determined solely by voting power, it wouldn't be possible to ensure
+liveness. Timeouts exist because the network can't rely on a single proposer
+being available and must move on if such is not responding.
+
+> How can we address situations where someone arbitrarily adjusts their block
+> production time to gain an advantage?
+
+The impact shown above is negligible in a decentralized network with enough
+decentralization.
+
+### The adverse effect of using inconsistent `timeout_commit` in a network
+
+Let's look at the same scenario as before. There are ten geographically
+distributed validators. One of them (Bob) sets `timeout_commit` to 0s. Others
+have it set to 1s (the default value). Now, Bob will be the fastest producer
+because he doesn't wait for additional precommits after creating a block. If
+waiting for precommits (`timeout_commit`) is not incentivized, Bob will accrue
+more rewards compared to the other 9 validators.
+
+This is because Bob has the advantage of broadcasting its proposal early (1
+second earlier than the others). But it also makes it possible for Bob to miss
+a proposal from another validator and prevote `nil` due to him starting
+`timeout_propose` earlier. I.e., if Bob's `timeout_commit` is too low comparing
+to other validators, then he might miss some proposals and get slashed for
+inactivity.

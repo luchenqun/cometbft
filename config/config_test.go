@@ -39,6 +39,11 @@ func TestConfigValidateBasic(t *testing.T) {
 	// tamper with timeout_propose
 	cfg.Consensus.TimeoutPropose = -10 * time.Second
 	assert.Error(t, cfg.ValidateBasic())
+	cfg.Consensus.TimeoutPropose = 3 * time.Second
+
+	cfg.Consensus.CreateEmptyBlocks = false
+	cfg.Mempool.Type = config.MempoolTypeNop
+	assert.Error(t, cfg.ValidateBasic())
 }
 
 func TestTLSConfiguration(t *testing.T) {
@@ -78,6 +83,7 @@ func TestRPCConfigValidateBasic(t *testing.T) {
 		"TimeoutBroadcastTxCommit",
 		"MaxBodyBytes",
 		"MaxHeaderBytes",
+		"MaxRequestBatchSize",
 	}
 
 	for _, fieldName := range fieldsToTest {
@@ -123,6 +129,9 @@ func TestMempoolConfigValidateBasic(t *testing.T) {
 		assert.Error(t, cfg.ValidateBasic())
 		reflect.ValueOf(cfg).Elem().FieldByName(fieldName).SetInt(0)
 	}
+
+	reflect.ValueOf(cfg).Elem().FieldByName("Type").SetString("invalid")
+	assert.Error(t, cfg.ValidateBasic())
 }
 
 func TestStateSyncConfigValidateBasic(t *testing.T) {
@@ -167,9 +176,11 @@ func TestConsensusConfig_ValidateBasic(t *testing.T) {
 		"PeerQueryMaj23SleepDuration":          {func(c *config.ConsensusConfig) { c.PeerQueryMaj23SleepDuration = time.Second }, false},
 		"PeerQueryMaj23SleepDuration negative": {func(c *config.ConsensusConfig) { c.PeerQueryMaj23SleepDuration = -1 }, true},
 		"DoubleSignCheckHeight negative":       {func(c *config.ConsensusConfig) { c.DoubleSignCheckHeight = -1 }, true},
+		"BlockTimeTolerance":                   {func(c *config.ConsensusConfig) { c.BlockTimeTolerance = time.Second }, false},
+		"BlockTimeTolerance zero":              {func(c *config.ConsensusConfig) { c.BlockTimeTolerance = 0 }, true},
+		"BlockTimeTolerance negative":          {func(c *config.ConsensusConfig) { c.BlockTimeTolerance = -1 }, true},
 	}
 	for desc, tc := range testcases {
-		tc := tc // appease linter
 		t.Run(desc, func(t *testing.T) {
 			cfg := config.DefaultConsensusConfig()
 			tc.modify(cfg)

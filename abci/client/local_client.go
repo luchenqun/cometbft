@@ -184,3 +184,24 @@ func (app *localClient) FinalizeBlock(ctx context.Context, req *types.RequestFin
 
 	return app.Application.FinalizeBlock(ctx, req)
 }
+
+func (app *localClient) EthQueryAsync(ctx context.Context, req *types.RequestEthQuery) (*ReqRes, error) {
+	app.mtx.Lock()
+	defer app.mtx.Unlock()
+
+	res, err := app.Application.EthQuery(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return app.callback(
+		types.ToRequestEthQuery(req),
+		types.ToResponseEthQuery(res),
+	), nil
+}
+
+func (app *localClient) EthQuerySync(ctx context.Context, req *types.RequestEthQuery) (*types.ResponseEthQuery, error) {
+	app.mtx.Lock()
+	defer app.mtx.Unlock()
+
+	return app.Application.EthQuery(ctx, req)
+}

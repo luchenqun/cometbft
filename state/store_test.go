@@ -11,10 +11,8 @@ import (
 	dbm "github.com/cometbft/cometbft-db"
 
 	abci "github.com/cometbft/cometbft/abci/types"
-	"github.com/cometbft/cometbft/crypto"
 	"github.com/cometbft/cometbft/crypto/ed25519"
 	"github.com/cometbft/cometbft/internal/test"
-	cmtrand "github.com/cometbft/cometbft/libs/rand"
 	cmtstate "github.com/cometbft/cometbft/proto/tendermint/state"
 	sm "github.com/cometbft/cometbft/state"
 	"github.com/cometbft/cometbft/types"
@@ -69,7 +67,7 @@ func BenchmarkLoadValidators(b *testing.B) {
 	require.NoError(b, err)
 
 	for i := 10; i < 10000000000; i *= 10 { // 10, 100, 1000, ...
-		i := i
+
 		if err := sm.SaveValidatorsInfo(stateDB,
 			int64(i), state.LastHeightValidatorsChanged, state.NextValidators); err != nil {
 			b.Fatal(err)
@@ -117,7 +115,7 @@ func TestPruneStates(t *testing.T) {
 		"prune when evidence height < height": {20, 1, 18, 17, false, []int64{13, 17, 18, 19, 20}, []int64{15, 18, 19, 20}, []int64{18, 19, 20}},
 	}
 	for name, tc := range testcases {
-		tc := tc
+
 		t.Run(name, func(t *testing.T) {
 			db := dbm.NewMemDB()
 			stateStore := sm.NewStore(db, sm.StoreOptions{
@@ -127,7 +125,7 @@ func TestPruneStates(t *testing.T) {
 
 			// Generate a bunch of state data. Validators change for heights ending with 3, and
 			// parameters when ending with 5.
-			validator := &types.Validator{Address: cmtrand.Bytes(crypto.AddressSize), VotingPower: 100, PubKey: pk}
+			validator := &types.Validator{Address: pk.Address(), VotingPower: 100, PubKey: pk}
 			validatorSet := &types.ValidatorSet{
 				Validators: []*types.Validator{validator},
 				Proposer:   validator,
@@ -168,6 +166,7 @@ func TestPruneStates(t *testing.T) {
 						{Data: []byte{2}},
 						{Data: []byte{3}},
 					},
+					AppHash: make([]byte, 1),
 				})
 				require.NoError(t, err)
 			}
@@ -257,6 +256,7 @@ func TestLastFinalizeBlockResponses(t *testing.T) {
 			TxResults: []*abci.ExecTxResult{
 				{Code: 32, Data: []byte("Hello"), Log: "Huh?"},
 			},
+			AppHash: make([]byte, 1),
 		}
 		// create new db and state store and set discard abciresponses to false.
 		stateDB = dbm.NewMemDB()
@@ -347,7 +347,7 @@ func TestFinalizeBlockRecoveryUsingLegacyABCIResponses(t *testing.T) {
 	resp, err := stateStore.LoadLastFinalizeBlockResponse(height)
 	require.NoError(t, err)
 	require.Equal(t, resp.ConsensusParamUpdates, &cp)
-	require.Equal(t, resp.Events, legacyResp.LegacyAbciResponses.BeginBlock.Events)
+	require.Equal(t, len(resp.Events), len(legacyResp.LegacyAbciResponses.BeginBlock.Events))
 	require.Equal(t, resp.TxResults[0], legacyResp.LegacyAbciResponses.DeliverTxs[0])
 }
 

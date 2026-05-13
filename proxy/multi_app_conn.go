@@ -14,6 +14,7 @@ const (
 	connMempool   = "mempool"
 	connQuery     = "query"
 	connSnapshot  = "snapshot"
+	connEthQuery  = "eth_query"
 )
 
 // AppConns is the CometBFT's interface to the application that consists of
@@ -29,6 +30,8 @@ type AppConns interface {
 	Query() AppConnQuery
 	// Snapshot connection
 	Snapshot() AppConnSnapshot
+	// EthQuery connection
+	EthQuery() AppConnEthQuery
 }
 
 // NewAppConns calls NewMultiAppConn.
@@ -49,11 +52,13 @@ type multiAppConn struct {
 	mempoolConn   AppConnMempool
 	queryConn     AppConnQuery
 	snapshotConn  AppConnSnapshot
+	ethQueryConn  AppConnEthQuery
 
 	consensusConnClient abcicli.Client
 	mempoolConnClient   abcicli.Client
 	queryConnClient     abcicli.Client
 	snapshotConnClient  abcicli.Client
+	ethQueryConnClient  abcicli.Client
 
 	clientCreator ClientCreator
 }
@@ -82,6 +87,10 @@ func (app *multiAppConn) Query() AppConnQuery {
 
 func (app *multiAppConn) Snapshot() AppConnSnapshot {
 	return app.snapshotConn
+}
+
+func (app *multiAppConn) EthQuery() AppConnEthQuery {
+	return app.ethQueryConn
 }
 
 func (app *multiAppConn) OnStart() error {
@@ -115,6 +124,14 @@ func (app *multiAppConn) OnStart() error {
 	}
 	app.consensusConnClient = c
 	app.consensusConn = NewAppConnConsensus(c, app.metrics)
+
+	c, err = app.abciClientFor(connEthQuery)
+	if err != nil {
+		app.stopAllClients()
+		return err
+	}
+	app.ethQueryConnClient = c
+	app.ethQueryConn = NewAppConnEthQuery(c)
 
 	// Kill CometBFT if the ABCI application crashes.
 	go app.killTMOnClientError()
@@ -154,6 +171,10 @@ func (app *multiAppConn) killTMOnClientError() {
 		if err := app.snapshotConnClient.Error(); err != nil {
 			killFn(connSnapshot, err, app.Logger)
 		}
+	case <-app.ethQueryConnClient.Quit():
+		if err := app.ethQueryConnClient.Error(); err != nil {
+			killFn(connEthQuery, err, app.Logger)
+		}
 	}
 }
 
@@ -176,6 +197,11 @@ func (app *multiAppConn) stopAllClients() {
 	if app.snapshotConnClient != nil {
 		if err := app.snapshotConnClient.Stop(); err != nil {
 			app.Logger.Error("error while stopping snapshot client", "error", err)
+		}
+	}
+	if app.ethQueryConnClient != nil {
+		if err := app.ethQueryConnClient.Stop(); err != nil {
+			app.Logger.Error("error while stopping eth query client", "error", err)
 		}
 	}
 }

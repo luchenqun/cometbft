@@ -2,6 +2,7 @@ package types
 
 import (
 	"io"
+	"math"
 
 	"github.com/cosmos/gogoproto/proto"
 
@@ -9,7 +10,7 @@ import (
 )
 
 const (
-	maxMsgSize = 104857600 // 100MB
+	maxMsgSize = math.MaxInt32 // 2GB
 )
 
 // WriteMessage writes a varint length-delimited protobuf message.
@@ -102,6 +103,12 @@ func ToRequestPrepareProposal(req *RequestPrepareProposal) *Request {
 func ToRequestProcessProposal(req *RequestProcessProposal) *Request {
 	return &Request{
 		Value: &Request_ProcessProposal{req},
+	}
+}
+
+func ToRequestEthQuery(req *RequestEthQuery) *Request {
+	return &Request{
+		Value: &Request_EthQuery{req},
 	}
 }
 
@@ -206,6 +213,12 @@ func ToResponsePrepareProposal(res *ResponsePrepareProposal) *Response {
 func ToResponseProcessProposal(res *ResponseProcessProposal) *Response {
 	return &Response{
 		Value: &Response_ProcessProposal{res},
+	}
+}
+
+func ToResponseEthQuery(res *ResponseEthQuery) *Response {
+	return &Response{
+		Value: &Response_EthQuery{res},
 	}
 }
 

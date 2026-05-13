@@ -40,14 +40,15 @@ Complete documentation can be found on the
 Please do not depend on `main` as your production branch. Use
 [releases](https://github.com/cometbft/cometbft/releases) instead.
 
-We haven't released v1.0 yet
-since we are making breaking changes to the protocol and the APIs. See below for
-more details about [versioning](#versioning).
+If you intend to run CometBFT in production, we're happy to help. To contact
+us, in order of preference:
 
-In any case, if you intend to run CometBFT in production, we're happy to help.
-
-To contact us, you can also 
-[join the chat](https://discord.com/channels/669268347736686612/669283915743232011).
+- [Create a new discussion on
+  GitHub](https://github.com/cometbft/cometbft/discussions)
+- Reach out to us via [Telegram](https://t.me/CometBFT)
+- [Join the Cosmos Network Discord](https://discord.gg/interchain) and
+  discuss in
+  [`#cometbft`](https://discord.com/channels/669268347736686612/1069933855307472906)
 
 More on how releases are conducted can be found [here](./RELEASES.md).
 
@@ -61,10 +62,10 @@ looking for, see [our security policy](SECURITY.md).
 
 | CometBFT version | Requirement | Notes             |
 |------------------|-------------|-------------------|
-| main             | Go version  | Go 1.20 or higher |
-| v0.38.x          | Go version  | Go 1.20 or higher |
-| v0.37.x          | Go version  | Go 1.20 or higher |
-| v0.34.x          | Go version  | Go 1.19 or higher |
+| main             | Go version  | Go 1.22 or higher |
+| v0.38.x          | Go version  | Go 1.22 or higher |
+| v0.37.x          | Go version  | Go 1.22 or higher |
+| v0.34.x          | Go version  | Go 1.12 or higher |
 
 ### Install
 
@@ -172,10 +173,10 @@ maintains [cometbft.com](https://cometbft.com).
 [version-url]: https://github.com/cometbft/cometbft/releases/latest
 [api-badge]: https://camo.githubusercontent.com/915b7be44ada53c290eb157634330494ebe3e30a/68747470733a2f2f676f646f632e6f72672f6769746875622e636f6d2f676f6c616e672f6764646f3f7374617475732e737667
 [api-url]: https://pkg.go.dev/github.com/cometbft/cometbft
-[go-badge]: https://img.shields.io/badge/go-1.20-blue.svg
+[go-badge]: https://img.shields.io/badge/go-1.22-blue.svg
 [go-url]: https://github.com/moovweb/gvm
 [discord-badge]: https://img.shields.io/discord/669268347736686612.svg
-[discord-url]: https://discord.gg/cosmosnetwork
+[discord-url]: https://discord.gg/interchain
 [license-badge]: https://img.shields.io/github/license/cometbft/cometbft.svg
 [license-url]: https://github.com/cometbft/cometbft/blob/main/LICENSE
 [sg-badge]: https://sourcegraph.com/github.com/cometbft/cometbft/-/badge.svg

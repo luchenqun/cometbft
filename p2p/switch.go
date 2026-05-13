@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -39,6 +40,8 @@ func MConnConfig(cfg *config.P2PConfig) conn.MConnConfig {
 	mConfig.SendRate = cfg.SendRate
 	mConfig.RecvRate = cfg.RecvRate
 	mConfig.MaxPacketMsgPayloadSize = cfg.MaxPacketMsgPayloadSize
+	mConfig.TestFuzz = cfg.TestFuzz
+	mConfig.TestFuzzConfig = cfg.TestFuzzConfig
 	return mConfig
 }
 
@@ -386,7 +389,8 @@ func (sw *Switch) stopAndRemovePeer(peer Peer, reason interface{}) {
 }
 
 // reconnectToPeer tries to reconnect to the addr, first repeatedly
-// with a fixed interval, then with exponential backoff.
+// with a fixed interval (approximately 2 minutes), then with
+// exponential backoff (approximately close to 24 hours).
 // If no success after all that, it stops trying, and leaves it
 // to the PEX/Addrbook to find the peer with the addr again
 // NOTE: this will keep trying even if the handshake or auth fails.
@@ -402,6 +406,7 @@ func (sw *Switch) reconnectToPeer(addr *NetAddress) {
 
 	start := time.Now()
 	sw.Logger.Info("Reconnecting to peer", "addr", addr)
+
 	for i := 0; i < reconnectAttempts; i++ {
 		if !sw.IsRunning() {
 			return
@@ -422,7 +427,7 @@ func (sw *Switch) reconnectToPeer(addr *NetAddress) {
 
 	sw.Logger.Error("Failed to reconnect to peer. Beginning exponential backoff",
 		"addr", addr, "elapsed", time.Since(start))
-	for i := 0; i < reconnectBackOffAttempts; i++ {
+	for i := 1; i <= reconnectBackOffAttempts; i++ {
 		if !sw.IsRunning() {
 			return
 		}
@@ -840,8 +845,8 @@ func (sw *Switch) addPeer(p Peer) error {
 	// so that if Receive errors, we will find the peer and remove it.
 	// Add should not err since we already checked peers.Has().
 	if err := sw.peers.Add(p); err != nil {
-		switch err.(type) {
-		case ErrPeerRemoval:
+		var peerRemovalErr ErrPeerRemoval
+		if errors.As(err, &peerRemovalErr) {
 			sw.Logger.Error("Error starting peer ",
 				" err ", "Peer has already errored and removal was attempted.",
 				"peer", p.ID())

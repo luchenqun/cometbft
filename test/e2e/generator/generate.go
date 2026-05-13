@@ -47,7 +47,7 @@ var (
 		2 * int(e2e.EvidenceAgeHeight),
 		4 * int(e2e.EvidenceAgeHeight),
 	}
-	evidence          = uniformChoice{0, 1, 10}
+	evidence          = uniformChoice{0, 1, 10, 20, 200}
 	abciDelays        = uniformChoice{"none", "small", "large"}
 	nodePerturbations = probSetChoice{
 		"disconnect": 0.1,
@@ -59,8 +59,9 @@ var (
 	lightNodePerturbations = probSetChoice{
 		"upgrade": 0.3,
 	}
-	voteExtensionEnableHeightOffset = uniformChoice{int64(0), int64(10), int64(100)}
-	voteExtensionEnabled            = uniformChoice{true, false}
+	voteExtensionUpdateHeight = uniformChoice{int64(-1), int64(0), int64(1)} // -1: genesis, 0: InitChain, 1: (use offset)
+	voteExtensionEnabled      = weightedChoice{true: 3, false: 1}
+	voteExtensionHeightOffset = uniformChoice{int64(0), int64(10), int64(100)}
 )
 
 type generateConfig struct {
@@ -147,9 +148,13 @@ func generateTestnet(r *rand.Rand, opt map[string]interface{}, upgradeVersion st
 		manifest.VoteExtensionDelay = 100 * time.Millisecond
 		manifest.FinalizeBlockDelay = 500 * time.Millisecond
 	}
-
+	manifest.VoteExtensionsUpdateHeight = voteExtensionUpdateHeight.Choose(r).(int64)
+	if manifest.VoteExtensionsUpdateHeight == 1 {
+		manifest.VoteExtensionsUpdateHeight = manifest.InitialHeight + voteExtensionHeightOffset.Choose(r).(int64)
+	}
 	if voteExtensionEnabled.Choose(r).(bool) {
-		manifest.VoteExtensionsEnableHeight = manifest.InitialHeight + voteExtensionEnableHeightOffset.Choose(r).(int64)
+		baseHeight := max(manifest.VoteExtensionsUpdateHeight+1, manifest.InitialHeight)
+		manifest.VoteExtensionsEnableHeight = baseHeight + voteExtensionHeightOffset.Choose(r).(int64)
 	}
 
 	var numSeeds, numValidators, numFulls, numLightClients int
@@ -355,11 +360,12 @@ func parseWeightedVersions(s string) (weightedChoice, string, error) {
 	for _, wv := range wvs {
 		parts := strings.Split(strings.TrimSpace(wv), ":")
 		var ver string
-		if len(parts) == 2 {
+		switch len(parts) {
+		case 2:
 			ver = strings.TrimSpace(strings.Join([]string{"cometbft/e2e-node", parts[0]}, ":"))
-		} else if len(parts) == 3 {
+		case 3:
 			ver = strings.TrimSpace(strings.Join([]string{parts[0], parts[1]}, ":"))
-		} else {
+		default:
 			return nil, "", fmt.Errorf("unexpected weight:version combination: %s", wv)
 		}
 

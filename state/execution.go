@@ -43,6 +43,9 @@ type BlockExecutor struct {
 	logger log.Logger
 
 	metrics *Metrics
+
+	// blockTimeTolerance is the maximum allowed difference between proposed block time and wall clock.
+	blockTimeTolerance time.Duration
 }
 
 type BlockExecutorOption func(executor *BlockExecutor)
@@ -50,6 +53,12 @@ type BlockExecutorOption func(executor *BlockExecutor)
 func BlockExecutorWithMetrics(metrics *Metrics) BlockExecutorOption {
 	return func(blockExec *BlockExecutor) {
 		blockExec.metrics = metrics
+	}
+}
+
+func BlockExecutorWithBlockTimeTolerance(d time.Duration) BlockExecutorOption {
+	return func(blockExec *BlockExecutor) {
+		blockExec.blockTimeTolerance = d
 	}
 }
 
@@ -113,6 +122,7 @@ func (blockExec *BlockExecutor) CreateProposalBlock(
 	}
 
 	maxGas := state.ConsensusParams.Block.MaxGas
+	maxTxs := state.ConsensusParams.Block.MaxTxs
 
 	evidence, evSize := blockExec.evpool.PendingEvidence(state.ConsensusParams.Evidence.MaxBytes)
 
@@ -123,15 +133,18 @@ func (blockExec *BlockExecutor) CreateProposalBlock(
 		maxReapBytes = -1
 	}
 
-	txs := blockExec.mempool.ReapMaxBytesMaxGas(maxReapBytes, maxGas)
+	txs := blockExec.mempool.ReapMaxTxsMaxBytesMaxGas(int(maxTxs), maxReapBytes, maxGas)
 	commit := lastExtCommit.ToCommit()
-	block := state.MakeBlock(height, txs, commit, evidence, proposerAddr)
+	block, err := state.MakeBlock(height, txs, commit, evidence, proposerAddr)
+	if err != nil {
+		return nil, err
+	}
 	rpp, err := blockExec.proxyApp.PrepareProposal(
 		ctx,
 		&abci.RequestPrepareProposal{
 			MaxTxBytes:         maxDataBytes,
 			Txs:                block.Txs.ToSliceOfBytes(),
-			LocalLastCommit:    buildExtendedCommitInfo(lastExtCommit, blockExec.store, state.InitialHeight, state.ConsensusParams.ABCI),
+			LocalLastCommit:    buildExtendedCommitInfoFromStore(lastExtCommit, blockExec.store, state.InitialHeight, state.ConsensusParams.ABCI),
 			Misbehavior:        block.Evidence.Evidence.ToABCI(),
 			Height:             block.Height,
 			Time:               block.Time,
@@ -156,7 +169,7 @@ func (blockExec *BlockExecutor) CreateProposalBlock(
 		return nil, err
 	}
 
-	return state.MakeBlock(height, txl, commit, evidence, proposerAddr), nil
+	return state.MakeBlock(height, txl, commit, evidence, proposerAddr)
 }
 
 func (blockExec *BlockExecutor) ProcessProposal(
@@ -165,10 +178,10 @@ func (blockExec *BlockExecutor) ProcessProposal(
 ) (bool, error) {
 	resp, err := blockExec.proxyApp.ProcessProposal(context.TODO(), &abci.RequestProcessProposal{
 		Hash:               block.Header.Hash(),
-		Height:             block.Header.Height,
-		Time:               block.Header.Time,
-		Txs:                block.Data.Txs.ToSliceOfBytes(),
-		ProposedLastCommit: buildLastCommitInfo(block, blockExec.store, state.InitialHeight),
+		Height:             block.Height,
+		Time:               block.Time,
+		Txs:                block.Txs.ToSliceOfBytes(),
+		ProposedLastCommit: buildLastCommitInfoFromStore(block, blockExec.store, state.InitialHeight),
 		Misbehavior:        block.Evidence.Evidence.ToABCI(),
 		ProposerAddress:    block.ProposerAddress,
 		NextValidatorsHash: block.NextValidatorsHash,
@@ -188,11 +201,37 @@ func (blockExec *BlockExecutor) ProcessProposal(
 // Validation does not mutate state, but does require historical information from the stateDB,
 // ie. to verify evidence from a validator at an old height.
 func (blockExec *BlockExecutor) ValidateBlock(state State, block *types.Block) error {
-	err := validateBlock(state, block)
-	if err != nil {
+	return blockExec.validateBlockAndCheckEvidence(state, block)
+}
+
+// ValidateBlockSkipLastCommit validates the same as blockexec.ValidateBlock
+// however it performs no validation of the block's LastCommit.
+//
+// This should only be used if you know that the LastCommit has already been validated elsewhere.
+func (blockExec *BlockExecutor) ValidateBlockSkipLastCommit(state State, block *types.Block) error {
+	return blockExec.validateBlockAndCheckEvidence(state, block, withSkipLastCommit)
+}
+
+func (blockExec *BlockExecutor) validateBlockAndCheckEvidence(state State, block *types.Block, opts ...func(*blockValidationOptions)) error {
+	if err := validateBlock(state, block, append(opts, blockExec.withBlockTimeTolerance)...); err != nil {
 		return err
 	}
 	return blockExec.evpool.CheckEvidence(block.Evidence.Evidence)
+}
+
+func (blockExec *BlockExecutor) withBlockTimeTolerance(opts *blockValidationOptions) {
+	opts.blockTimeTolerance = blockExec.blockTimeTolerance
+}
+
+func withSkipLastCommit(opts *blockValidationOptions) {
+	opts.skipLastCommitVerification = true
+}
+
+// ApplyVerifiedBlock does the same as `ApplyBlock`, but skips verification.
+func (blockExec *BlockExecutor) ApplyVerifiedBlock(
+	state State, blockID types.BlockID, block *types.Block,
+) (State, error) {
+	return blockExec.applyBlock(state, blockID, block)
 }
 
 // ApplyBlock validates the block against the state, executes it against the app,
@@ -205,12 +244,14 @@ func (blockExec *BlockExecutor) ApplyBlock(
 	state State, blockID types.BlockID, block *types.Block,
 ) (State, error) {
 
-	if err := validateBlock(state, block); err != nil {
+	if err := validateBlock(state, block, blockExec.withBlockTimeTolerance); err != nil {
 		return state, ErrInvalidBlock(err)
 	}
 
-	commitInfo := buildLastCommitInfo(block, blockExec.store, state.InitialHeight)
+	return blockExec.applyBlock(state, blockID, block)
+}
 
+func (blockExec *BlockExecutor) applyBlock(state State, blockID types.BlockID, block *types.Block) (State, error) {
 	startTime := time.Now().UnixNano()
 	abciResponse, err := blockExec.proxyApp.FinalizeBlock(context.TODO(), &abci.RequestFinalizeBlock{
 		Hash:               block.Hash(),
@@ -218,7 +259,7 @@ func (blockExec *BlockExecutor) ApplyBlock(
 		ProposerAddress:    block.ProposerAddress,
 		Height:             block.Height,
 		Time:               block.Time,
-		DecidedLastCommit:  commitInfo,
+		DecidedLastCommit:  buildLastCommitInfoFromStore(block, blockExec.store, state.InitialHeight),
 		Misbehavior:        block.Evidence.Evidence.ToABCI(),
 		Txs:                block.Txs.ToSliceOfBytes(),
 	})
@@ -238,8 +279,8 @@ func (blockExec *BlockExecutor) ApplyBlock(
 	)
 
 	// Assert that the application correctly returned tx results for each of the transactions provided in the block
-	if len(block.Data.Txs) != len(abciResponse.TxResults) {
-		return state, fmt.Errorf("expected tx results length to match size of transactions in block. Expected %d, got %d", len(block.Data.Txs), len(abciResponse.TxResults))
+	if len(block.Txs) != len(abciResponse.TxResults) {
+		return state, fmt.Errorf("expected tx results length to match size of transactions in block. Expected %d, got %d", len(block.Txs), len(abciResponse.TxResults))
 	}
 
 	blockExec.logger.Info("executed block", "height", block.Height, "app_hash", fmt.Sprintf("%X", abciResponse.AppHash))
@@ -325,12 +366,13 @@ func (blockExec *BlockExecutor) ExtendVote(
 	if vote.Height != block.Height {
 		panic(fmt.Sprintf("vote's and block's heights do not match %d!=%d", block.Height, vote.Height))
 	}
+
 	req := abci.RequestExtendVote{
 		Hash:               vote.BlockID.Hash,
 		Height:             vote.Height,
 		Time:               block.Time,
 		Txs:                block.Txs.ToSliceOfBytes(),
-		ProposedLastCommit: buildLastCommitInfo(block, blockExec.store, state.InitialHeight),
+		ProposedLastCommit: buildLastCommitInfoFromStore(block, blockExec.store, state.InitialHeight),
 		Misbehavior:        block.Evidence.Evidence.ToABCI(),
 		NextValidatorsHash: block.NextValidatorsHash,
 		ProposerAddress:    block.ProposerAddress,
@@ -419,8 +461,8 @@ func (blockExec *BlockExecutor) Commit(
 //---------------------------------------------------------
 // Helper functions for executing blocks and updating state
 
-func buildLastCommitInfo(block *types.Block, store Store, initialHeight int64) abci.CommitInfo {
-	if block.Height == initialHeight {
+func buildLastCommitInfoFromStore(block *types.Block, store Store, initialHeight int64) abci.CommitInfo {
+	if block.Height == initialHeight { // check for initial height before loading validators
 		// there is no last commit for the initial height.
 		// return an empty value.
 		return abci.CommitInfo{}
@@ -429,6 +471,19 @@ func buildLastCommitInfo(block *types.Block, store Store, initialHeight int64) a
 	lastValSet, err := store.LoadValidators(block.Height - 1)
 	if err != nil {
 		panic(fmt.Errorf("failed to load validator set at height %d: %w", block.Height-1, err))
+	}
+
+	return BuildLastCommitInfo(block, lastValSet, initialHeight)
+}
+
+// BuildLastCommitInfo builds a CommitInfo from the given block and validator set.
+// If you want to load the validator set from the store instead of providing it,
+// use buildLastCommitInfoFromStore.
+func BuildLastCommitInfo(block *types.Block, lastValSet *types.ValidatorSet, initialHeight int64) abci.CommitInfo {
+	if block.Height == initialHeight {
+		// there is no last commit for the initial height.
+		// return an empty value.
+		return abci.CommitInfo{}
 	}
 
 	var (
@@ -460,7 +515,7 @@ func buildLastCommitInfo(block *types.Block, store Store, initialHeight int64) a
 	}
 }
 
-// buildExtendedCommitInfo populates an ABCI extended commit from the
+// buildExtendedCommitInfoFromStore populates an ABCI extended commit from the
 // corresponding CometBFT extended commit ec, using the stored validator set
 // from ec.  It requires ec to include the original precommit votes along with
 // the vote extensions from the last commit.
@@ -469,7 +524,7 @@ func buildLastCommitInfo(block *types.Block, store Store, initialHeight int64) a
 // data, it returns an empty record.
 //
 // Assumes that the commit signatures are sorted according to validator index.
-func buildExtendedCommitInfo(ec *types.ExtendedCommit, store Store, initialHeight int64, ap types.ABCIParams) abci.ExtendedCommitInfo {
+func buildExtendedCommitInfoFromStore(ec *types.ExtendedCommit, store Store, initialHeight int64, ap types.ABCIParams) abci.ExtendedCommitInfo {
 	if ec.Height < initialHeight {
 		// There are no extended commits for heights below the initial height.
 		return abci.ExtendedCommitInfo{}
@@ -478,6 +533,18 @@ func buildExtendedCommitInfo(ec *types.ExtendedCommit, store Store, initialHeigh
 	valSet, err := store.LoadValidators(ec.Height)
 	if err != nil {
 		panic(fmt.Errorf("failed to load validator set at height %d, initial height %d: %w", ec.Height, initialHeight, err))
+	}
+
+	return BuildExtendedCommitInfo(ec, valSet, initialHeight, ap)
+}
+
+// BuildExtendedCommitInfo builds an ExtendedCommitInfo from the given block and validator set.
+// If you want to load the validator set from the store instead of providing it,
+// use buildExtendedCommitInfoFromStore.
+func BuildExtendedCommitInfo(ec *types.ExtendedCommit, valSet *types.ValidatorSet, initialHeight int64, ap types.ABCIParams) abci.ExtendedCommitInfo {
+	if ec.Height < initialHeight {
+		// There are no extended commits for heights below the initial height.
+		return abci.ExtendedCommitInfo{}
 	}
 
 	var (
@@ -669,7 +736,7 @@ func fireEvents(
 		}
 	}
 
-	for i, tx := range block.Data.Txs {
+	for i, tx := range block.Txs {
 		if err := eventBus.PublishEventTx(types.EventDataTx{TxResult: abci.TxResult{
 			Height: block.Height,
 			Index:  uint32(i),
@@ -700,7 +767,7 @@ func ExecCommitBlock(
 	store Store,
 	initialHeight int64,
 ) ([]byte, error) {
-	commitInfo := buildLastCommitInfo(block, store, initialHeight)
+	commitInfo := buildLastCommitInfoFromStore(block, store, initialHeight)
 
 	resp, err := appConnConsensus.FinalizeBlock(context.TODO(), &abci.RequestFinalizeBlock{
 		Hash:               block.Hash(),
@@ -718,8 +785,8 @@ func ExecCommitBlock(
 	}
 
 	// Assert that the application correctly returned tx results for each of the transactions provided in the block
-	if len(block.Data.Txs) != len(resp.TxResults) {
-		return nil, fmt.Errorf("expected tx results length to match size of transactions in block. Expected %d, got %d", len(block.Data.Txs), len(resp.TxResults))
+	if len(block.Txs) != len(resp.TxResults) {
+		return nil, fmt.Errorf("expected tx results length to match size of transactions in block. Expected %d, got %d", len(block.Txs), len(resp.TxResults))
 	}
 
 	logger.Info("executed block", "height", block.Height, "app_hash", fmt.Sprintf("%X", resp.AppHash))

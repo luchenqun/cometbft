@@ -30,7 +30,7 @@ func makeJSONRPCHandler(funcMap map[string]*RPCFunc, logger log.Logger) http.Han
 			return
 		}
 
-		// if its an empty request (like from a browser), just display a list of
+		// if it's an empty request (like from a browser), just display a list of
 		// functions
 		if len(b) == 0 {
 			writeListOfEndpoints(w, r, funcMap)
@@ -80,14 +80,50 @@ func makeJSONRPCHandler(funcMap map[string]*RPCFunc, logger log.Logger) http.Han
 				cache = false
 				continue
 			}
+			ctx := &types.Context{JSONReq: &request, HTTPReq: r}
+			args := []reflect.Value{reflect.ValueOf(ctx)}
 			rpcFunc, ok := funcMap[request.Method]
-			if !ok || (rpcFunc.ws) {
+
+			if !ok {
+				var isEthQuery bool
+				for _, method := range types.SupportedEthQueryRequests {
+					if method == request.Method {
+						isEthQuery = true
+						break
+					}
+				}
+				if !isEthQuery {
+					responses = append(responses, types.RPCMethodNotFoundError(request.ID))
+					cache = false
+					continue
+				}
+
+				rpcFunc = funcMap["eth_query"]
+				bz, err := json.Marshal(request)
+				if err != nil {
+					responses = append(responses, types.RPCInvalidRequestError(request.ID, err))
+					continue
+				}
+				args = append(args, reflect.ValueOf(bz))
+
+				if cache && !rpcFunc.cacheableWithArgs(args) {
+					cache = false
+				}
+
+				returns := rpcFunc.f.Call(args)
+				result, err := unreflectResult(returns)
+				if err != nil {
+					responses = append(responses, types.RPCInternalError(request.ID, err))
+					continue
+				}
+				responses = append(responses, types.NewEthRPCSuccessResponse(request.ID, result, request.Method))
+				continue
+			}
+			if rpcFunc.ws {
 				responses = append(responses, types.RPCMethodNotFoundError(request.ID))
 				cache = false
 				continue
 			}
-			ctx := &types.Context{JSONReq: &request, HTTPReq: r}
-			args := []reflect.Value{reflect.ValueOf(ctx)}
 			if len(request.Params) > 0 {
 				fnArgs, err := jsonParamsToArgs(rpcFunc, request.Params)
 				if err != nil {
@@ -236,7 +272,7 @@ func writeListOfEndpoints(w http.ResponseWriter, r *http.Request, funcMap map[st
 
 	for _, name := range noArgNames {
 		link := fmt.Sprintf("//%s/%s", r.Host, name)
-		buf.WriteString(fmt.Sprintf("<a href=\"%s\">%s</a></br>", link, link))
+		fmt.Fprintf(buf, "<a href=\"%s\">%s</a></br>", link, link)
 	}
 
 	buf.WriteString("<br>Endpoints that require arguments:<br>")
@@ -249,7 +285,7 @@ func writeListOfEndpoints(w http.ResponseWriter, r *http.Request, funcMap map[st
 				link += "&"
 			}
 		}
-		buf.WriteString(fmt.Sprintf("<a href=\"%s\">%s</a></br>", link, link))
+		fmt.Fprintf(buf, "<a href=\"%s\">%s</a></br>", link, link)
 	}
 	buf.WriteString("</body></html>")
 	w.Header().Set("Content-Type", "text/html")

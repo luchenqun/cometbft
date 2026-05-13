@@ -14,6 +14,8 @@ import (
 
 	"github.com/cometbft/cometbft/crypto"
 	"github.com/cometbft/cometbft/crypto/ed25519"
+	cryptoenc "github.com/cometbft/cometbft/crypto/encoding"
+	"github.com/cometbft/cometbft/crypto/sr25519"
 	cmtmath "github.com/cometbft/cometbft/libs/math"
 	cmtrand "github.com/cometbft/cometbft/libs/rand"
 	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
@@ -78,9 +80,10 @@ func TestValidatorSetBasic(t *testing.T) {
 	assert.Equal(t, proposerPriority, val.ProposerPriority)
 }
 
-func TestValidatorSetValidateBasic(t *testing.T) {
+func TestValidatorSet_ValidateBasic(t *testing.T) {
 	val, _ := RandValidator(false, 1)
 	badVal := &Validator{}
+	val2, _ := RandValidator(false, 1)
 
 	testCases := []struct {
 		vals ValidatorSet
@@ -121,6 +124,14 @@ func TestValidatorSetValidateBasic(t *testing.T) {
 			err: false,
 			msg: "",
 		},
+		{
+			vals: ValidatorSet{
+				Validators: []*Validator{val},
+				Proposer:   val2,
+			},
+			err: true,
+			msg: ErrProposerNotInVals.Error(),
+		},
 	}
 
 	for _, tc := range testCases {
@@ -148,6 +159,30 @@ func TestCopy(t *testing.T) {
 	if !bytes.Equal(vsetHash, vsetCopyHash) {
 		t.Fatalf("ValidatorSet copy had wrong hash. Orig: %X, Copy: %X", vsetHash, vsetCopyHash)
 	}
+}
+
+func TestValidatorSet_ProposerPriorityHash(t *testing.T) {
+	vset := NewValidatorSet(nil)
+	assert.Equal(t, []byte(nil), vset.ProposerPriorityHash())
+
+	vset = randValidatorSet(3)
+	assert.NotNil(t, vset.ProposerPriorityHash())
+
+	// Marshaling and unmarshalling do not affect ProposerPriorityHash
+	bz, err := vset.ToProto()
+	assert.NoError(t, err)
+	vsetProto, err := ValidatorSetFromProto(bz)
+	assert.NoError(t, err)
+	assert.Equal(t, vset.ProposerPriorityHash(), vsetProto.ProposerPriorityHash())
+
+	// Copy does not affect ProposerPriorityHash
+	vsetCopy := vset.Copy()
+	assert.Equal(t, vset.ProposerPriorityHash(), vsetCopy.ProposerPriorityHash())
+
+	// Incrementing priorities changes ProposerPriorityHash() but not Hash()
+	vset.IncrementProposerPriority(1)
+	assert.Equal(t, vset.Hash(), vsetCopy.Hash())
+	assert.NotEqual(t, vset.ProposerPriorityHash(), vsetCopy.ProposerPriorityHash())
 }
 
 // Test that IncrementProposerPriority requires positive times.
@@ -299,18 +334,22 @@ func TestProposerSelection2(t *testing.T) {
 }
 
 func TestProposerSelection3(t *testing.T) {
-	vset := NewValidatorSet([]*Validator{
+	vals := []*Validator{
 		newValidator([]byte("avalidator_address12"), 1),
 		newValidator([]byte("bvalidator_address12"), 1),
 		newValidator([]byte("cvalidator_address12"), 1),
 		newValidator([]byte("dvalidator_address12"), 1),
-	})
+	}
 
+	for i := 0; i < 4; i++ {
+		pk := ed25519.GenPrivKey().PubKey()
+		vals[i].PubKey = pk
+		vals[i].Address = pk.Address()
+	}
+	sort.Sort(ValidatorsByAddress(vals))
+	vset := NewValidatorSet(vals)
 	proposerOrder := make([]*Validator, 4)
 	for i := 0; i < 4; i++ {
-		// need to give all validators to have keys
-		pk := ed25519.GenPrivKey().PubKey()
-		vset.Validators[i].PubKey = pk
 		proposerOrder[i] = vset.GetProposer()
 		vset.IncrementProposerPriority(1)
 	}
@@ -326,7 +365,7 @@ func TestProposerSelection3(t *testing.T) {
 		got := vset.GetProposer().Address
 		expected := proposerOrder[j%4].Address
 		if !bytes.Equal(got, expected) {
-			t.Fatalf(fmt.Sprintf("vset.Proposer (%X) does not match expected proposer (%X) for (%d, %d)", got, expected, i, j))
+			t.Fatalf("vset.Proposer (%X) does not match expected proposer (%X) for (%d, %d)", got, expected, i, j)
 		}
 
 		// serialize, deserialize, check proposer
@@ -337,13 +376,11 @@ func TestProposerSelection3(t *testing.T) {
 		if i != 0 {
 			if !bytes.Equal(got, computed.Address) {
 				t.Fatalf(
-					fmt.Sprintf(
-						"vset.Proposer (%X) does not match computed proposer (%X) for (%d, %d)",
-						got,
-						computed.Address,
-						i,
-						j,
-					),
+					"vset.Proposer (%X) does not match computed proposer (%X) for (%d, %d)",
+					got,
+					computed.Address,
+					i,
+					j,
 				)
 			}
 		}
@@ -433,6 +470,25 @@ func TestValidatorSetTotalVotingPowerPanicsOnOverflow(t *testing.T) {
 	}
 
 	assert.Panics(t, shouldPanic)
+}
+
+func TestValidatorSetFromProtoReturnsErrorOnOverflow(t *testing.T) {
+	// ValidatorSetFromProto should return an error instead of panicking when total voting power exceeds MaxTotalVotingPower.
+	pubKey := ed25519.GenPrivKey().PubKey()
+	pkProto, err := cryptoenc.PubKeyToProto(pubKey)
+	require.NoError(t, err)
+
+	protoVals := &cmtproto.ValidatorSet{
+		Validators: []*cmtproto.Validator{
+			{Address: pubKey.Address(), PubKey: pkProto, VotingPower: math.MaxInt64, ProposerPriority: 0},
+			{Address: pubKey.Address(), PubKey: pkProto, VotingPower: math.MaxInt64, ProposerPriority: 0},
+		},
+		Proposer: &cmtproto.Validator{Address: pubKey.Address(), PubKey: pkProto, VotingPower: math.MaxInt64, ProposerPriority: 0},
+	}
+
+	_, err = ValidatorSetFromProto(protoVals)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum")
 }
 
 func TestAvgProposerPriority(t *testing.T) {
@@ -796,7 +852,8 @@ func verifyValidatorSet(t *testing.T, valSet *ValidatorSet) {
 
 	// verify that the set's total voting power has been updated
 	tvp := valSet.totalVotingPower
-	valSet.updateTotalVotingPower()
+	err := valSet.updateTotalVotingPower()
+	require.NoError(t, err)
 	expectedTvp := valSet.TotalVotingPower()
 	assert.Equal(t, expectedTvp, tvp,
 		"expected TVP %d. Got %d, valSet=%s", expectedTvp, tvp, valSet)
@@ -1421,7 +1478,7 @@ func TestValSetUpdateOverflowRelated(t *testing.T) {
 	}
 
 	for _, tt := range testCases {
-		tt := tt
+
 		t.Run(tt.name, func(t *testing.T) {
 			valSet := createNewValidatorSet(tt.startVals)
 			verifyValidatorSet(t, valSet)
@@ -1571,5 +1628,210 @@ func BenchmarkUpdates(b *testing.B) {
 		// Add m validators to valSetCopy
 		valSetCopy := valSet.Copy()
 		assert.NoError(b, valSetCopy.UpdateWithChangeSet(newValList))
+	}
+}
+
+func TestVerifyCommitWithInvalidProposerKey(t *testing.T) {
+	vs := &ValidatorSet{
+		Validators: []*Validator{{}, {}},
+	}
+	commit := &Commit{
+		Height:     100,
+		Signatures: []CommitSig{{}, {}},
+	}
+	var bid BlockID
+	cid := ""
+	err := vs.VerifyCommit(cid, bid, 100, commit)
+	assert.Error(t, err)
+}
+
+func TestVerifyCommitSingleWithInvalidSignatures(t *testing.T) {
+	vs := &ValidatorSet{
+		Validators: []*Validator{{}, {}},
+	}
+	commit := &Commit{
+		Height:     100,
+		Signatures: []CommitSig{{}, {}},
+	}
+	cid := ""
+	votingPowerNeeded := vs.TotalVotingPower() * 2 / 3
+
+	// ignore all absent signatures
+	ignore := func(c CommitSig) bool { return c.BlockIDFlag == BlockIDFlagAbsent }
+
+	// only count the signatures that are for the block
+	count := func(c CommitSig) bool { return c.BlockIDFlag == BlockIDFlagCommit }
+
+	err := verifyCommitSingle(cid, vs, commit, votingPowerNeeded, ignore, count, true, true)
+	assert.Error(t, err)
+}
+
+func TestValidatorSet_AllKeysHaveSameType(t *testing.T) {
+	testCases := []struct {
+		vals     *ValidatorSet
+		sameType bool
+	}{
+		{
+			vals:     NewValidatorSet([]*Validator{}),
+			sameType: true,
+		},
+		{
+			vals:     randValidatorSet(1),
+			sameType: true,
+		},
+		{
+			vals:     randValidatorSet(2),
+			sameType: true,
+		},
+		{
+			vals:     NewValidatorSet([]*Validator{randValidator(100), NewValidator(sr25519.GenPrivKey().PubKey(), 200)}),
+			sameType: false,
+		},
+	}
+
+	for i, tc := range testCases {
+		if tc.sameType {
+			assert.True(t, tc.vals.AllKeysHaveSameType(), "test %d", i)
+		} else {
+			assert.False(t, tc.vals.AllKeysHaveSameType(), "test %d", i)
+		}
+	}
+}
+
+func TestValidatorSet_TotalVotingPowerSafe(t *testing.T) {
+	testCases := []struct {
+		name          string
+		validators    []*Validator
+		expectedPower int64
+		expectError   bool
+		errorContains string
+	}{
+		{
+			name: "happy path - normal validators",
+			validators: []*Validator{
+				NewValidator(ed25519.GenPrivKey().PubKey(), 100),
+				NewValidator(ed25519.GenPrivKey().PubKey(), 200),
+				NewValidator(ed25519.GenPrivKey().PubKey(), 300),
+			},
+			expectedPower: 600,
+			expectError:   false,
+		},
+		{
+			name:          "zero state - empty validator set",
+			validators:    []*Validator{},
+			expectedPower: 0,
+			expectError:   false,
+		},
+		{
+			name:          "zero state - nil validator set",
+			validators:    nil,
+			expectedPower: 0,
+			expectError:   false,
+		},
+		{
+			name: "single validator",
+			validators: []*Validator{
+				NewValidator(ed25519.GenPrivKey().PubKey(), 1000),
+			},
+			expectedPower: 1000,
+			expectError:   false,
+		},
+		{
+			name: "boundary - exactly at MaxTotalVotingPower",
+			validators: []*Validator{
+				NewValidator(ed25519.GenPrivKey().PubKey(), MaxTotalVotingPower),
+			},
+			expectedPower: MaxTotalVotingPower,
+			expectError:   false,
+		},
+		{
+			name: "boundary - sum equals MaxTotalVotingPower",
+			validators: []*Validator{
+				NewValidator(ed25519.GenPrivKey().PubKey(), MaxTotalVotingPower-100),
+				NewValidator(ed25519.GenPrivKey().PubKey(), 100),
+			},
+			expectedPower: MaxTotalVotingPower,
+			expectError:   false,
+		},
+		{
+			name: "overflow - exceeds MaxTotalVotingPower",
+			validators: []*Validator{
+				NewValidator(ed25519.GenPrivKey().PubKey(), MaxTotalVotingPower/2+1),
+				NewValidator(ed25519.GenPrivKey().PubKey(), MaxTotalVotingPower/2+1),
+			},
+			expectedPower: 0,
+			expectError:   true,
+			errorContains: "exceeds maximum",
+		},
+		{
+			name: "overflow - multiple validators exceeding MaxTotalVotingPower",
+			validators: []*Validator{
+				NewValidator(ed25519.GenPrivKey().PubKey(), MaxTotalVotingPower),
+				NewValidator(ed25519.GenPrivKey().PubKey(), 1),
+			},
+			expectedPower: 0,
+			expectError:   true,
+			errorContains: "exceeds maximum",
+		},
+		{
+			name: "overflow - three large validators",
+			validators: []*Validator{
+				NewValidator(ed25519.GenPrivKey().PubKey(), math.MaxInt64/2),
+				NewValidator(ed25519.GenPrivKey().PubKey(), math.MaxInt64/2),
+				NewValidator(ed25519.GenPrivKey().PubKey(), 100),
+			},
+			expectedPower: 0,
+			expectError:   true,
+			errorContains: "exceeds maximum",
+		},
+		{
+			name: "validators with zero voting power",
+			validators: []*Validator{
+				NewValidator(ed25519.GenPrivKey().PubKey(), 100),
+				NewValidator(ed25519.GenPrivKey().PubKey(), 0),
+				NewValidator(ed25519.GenPrivKey().PubKey(), 200),
+			},
+			expectedPower: 300,
+			expectError:   false,
+		},
+		{
+			name: "large number of validators - within limit",
+			validators: func() []*Validator {
+				vals := make([]*Validator, 100)
+				for i := 0; i < 100; i++ {
+					vals[i] = NewValidator(ed25519.GenPrivKey().PubKey(), 1000)
+				}
+				return vals
+			}(),
+			expectedPower: 100000,
+			expectError:   false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create validator set without using NewValidatorSet to avoid panic on overflow
+			valSet := &ValidatorSet{
+				Validators: tc.validators,
+			}
+
+			// Call TotalVotingPowerSafe
+			totalPower, err := valSet.TotalVotingPowerSafe()
+
+			// Assert expectations
+			if tc.expectError {
+				require.Error(t, err, "expected error but got none")
+				if tc.errorContains != "" {
+					require.Contains(t, err.Error(), tc.errorContains,
+						"error message should contain expected text")
+				}
+				require.Equal(t, tc.expectedPower, totalPower,
+					"power should be %d when error occurs", tc.expectedPower)
+			} else {
+				require.NoError(t, err, "unexpected error: %v", err)
+				require.Equal(t, tc.expectedPower, totalPower,
+					"total voting power should be %d", tc.expectedPower)
+			}
+		})
 	}
 }

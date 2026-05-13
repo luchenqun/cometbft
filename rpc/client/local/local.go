@@ -15,6 +15,7 @@ import (
 	ctypes "github.com/cometbft/cometbft/rpc/core/types"
 	rpctypes "github.com/cometbft/cometbft/rpc/jsonrpc/types"
 	"github.com/cometbft/cometbft/types"
+	"github.com/cometbft/cometbft/votepool"
 )
 
 /*
@@ -212,6 +213,14 @@ func (c *Local) BroadcastEvidence(_ context.Context, ev types.Evidence) (*ctypes
 	return c.env.BroadcastEvidence(c.ctx, ev)
 }
 
+func (c *Local) BroadcastVote(_ context.Context, _ votepool.Vote) (*ctypes.ResultBroadcastVote, error) {
+	return nil, fmt.Errorf("broadcast vote is not supported by this cometbft version")
+}
+
+func (c *Local) QueryVote(_ context.Context, _ int, _ []byte) (*ctypes.ResultQueryVote, error) {
+	return nil, fmt.Errorf("query vote is not supported by this cometbft version")
+}
+
 func (c *Local) Subscribe(
 	ctx context.Context,
 	subscriber,
@@ -232,7 +241,7 @@ func (c *Local) Subscribe(
 	if outCap > 0 {
 		sub, err = c.EventBus.Subscribe(ctx, subscriber, q, outCap)
 	} else {
-		sub, err = c.EventBus.SubscribeUnbuffered(ctx, subscriber, q)
+		sub, err = c.SubscribeUnbuffered(ctx, subscriber, q)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to subscribe: %w", err)

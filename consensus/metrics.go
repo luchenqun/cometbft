@@ -8,6 +8,7 @@ import (
 
 	cstypes "github.com/cometbft/cometbft/consensus/types"
 	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
+	types "github.com/cometbft/cometbft/types"
 )
 
 const (
@@ -56,6 +57,8 @@ type Metrics struct {
 	NumTxs metrics.Gauge
 	// Size of the block.
 	BlockSizeBytes metrics.Gauge
+	// Size of the chain in bytes.
+	ChainSizeBytes metrics.Counter
 	// Total number of transactions.
 	TotalTxs metrics.Gauge
 	// The latest block height.
@@ -90,11 +93,29 @@ type Metrics struct {
 	//metrics:Interval in seconds between the proposal timestamp and the timestamp of the earliest prevote that achieved a quorum.
 	QuorumPrevoteDelay metrics.Gauge `metrics_labels:"proposer_address"`
 
+	// QuorumPrecommitDelay is the interval in seconds between the proposal
+	// timestamp and the timestamp of the earliest precommit that achieved a quorum
+	// during the precommit step.
+	//
+	// To compute it, sum the voting power over each precommit received, in increasing
+	// order of timestamp. The timestamp of the first precommit to increase the sum to
+	// be above 2/3 of the total voting power of the network defines the endpoint
+	// the endpoint of the interval. Subtract the proposal timestamp from this endpoint
+	// to obtain the quorum delay.
+	//metrics:Interval in seconds between the proposal timestamp and the timestamp of the earliest precommit that achieved a quorum.
+	QuorumPrecommitDelay metrics.Gauge `metrics_labels:"proposer_address"`
+
 	// FullPrevoteDelay is the interval in seconds between the proposal
 	// timestamp and the timestamp of the latest prevote in a round where 100%
 	// of the voting power on the network issued prevotes.
 	//metrics:Interval in seconds between the proposal timestamp and the timestamp of the latest prevote in a round where all validators voted.
 	FullPrevoteDelay metrics.Gauge `metrics_labels:"proposer_address"`
+
+	// PrecommitsCounted is the number of precommit votes counted after the timeout commit period has ended.
+	PrecommitsCounted metrics.Gauge
+
+	// PrecommitsStakingPercentage is the voting power percentage of precommit votes once the timeout commit period has ended.
+	PrecommitsStakingPercentage metrics.Gauge
 
 	// VoteExtensionReceiveCount is the number of vote extensions received by this
 	// node. The metric is annotated by the status of the vote extension from the
@@ -142,7 +163,7 @@ func (m *Metrics) MarkVoteExtensionReceived(accepted bool) {
 
 func (m *Metrics) MarkVoteReceived(vt cmtproto.SignedMsgType, power, totalPower int64) {
 	p := float64(power) / float64(totalPower)
-	n := strings.ToLower(strings.TrimPrefix(vt.String(), "SIGNED_MSG_TYPE_"))
+	n := types.SignedMsgTypeToShortString(vt)
 	m.RoundVotingPowerPercent.With("vote_type", n).Add(p)
 }
 
@@ -151,17 +172,15 @@ func (m *Metrics) MarkRound(r int32, st time.Time) {
 	roundTime := time.Since(st).Seconds()
 	m.RoundDurationSeconds.Observe(roundTime)
 
-	pvt := cmtproto.PrevoteType
-	pvn := strings.ToLower(strings.TrimPrefix(pvt.String(), "SIGNED_MSG_TYPE_"))
+	pvn := types.SignedMsgTypeToShortString(cmtproto.PrevoteType)
 	m.RoundVotingPowerPercent.With("vote_type", pvn).Set(0)
 
-	pct := cmtproto.PrecommitType
-	pcn := strings.ToLower(strings.TrimPrefix(pct.String(), "SIGNED_MSG_TYPE_"))
+	pcn := types.SignedMsgTypeToShortString(cmtproto.PrecommitType)
 	m.RoundVotingPowerPercent.With("vote_type", pcn).Set(0)
 }
 
 func (m *Metrics) MarkLateVote(vt cmtproto.SignedMsgType) {
-	n := strings.ToLower(strings.TrimPrefix(vt.String(), "SIGNED_MSG_TYPE_"))
+	n := types.SignedMsgTypeToShortString(vt)
 	m.LateVotes.With("vote_type", n).Add(1)
 }
 

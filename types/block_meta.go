@@ -22,7 +22,7 @@ func NewBlockMeta(block *Block, blockParts *PartSet) *BlockMeta {
 		BlockID:   BlockID{block.Hash(), blockParts.Header()},
 		BlockSize: block.Size(),
 		Header:    block.Header,
-		NumTxs:    len(block.Data.Txs),
+		NumTxs:    len(block.Txs),
 	}
 }
 
@@ -41,6 +41,14 @@ func (bm *BlockMeta) ToProto() *cmtproto.BlockMeta {
 }
 
 func BlockMetaFromProto(pb *cmtproto.BlockMeta) (*BlockMeta, error) {
+	bm, err := BlockMetaFromTrustedProto(pb)
+	if err != nil {
+		return nil, err
+	}
+	return bm, bm.ValidateBasic()
+}
+
+func BlockMetaFromTrustedProto(pb *cmtproto.BlockMeta) (*BlockMeta, error) {
 	if pb == nil {
 		return nil, errors.New("blockmeta is empty")
 	}
@@ -62,7 +70,7 @@ func BlockMetaFromProto(pb *cmtproto.BlockMeta) (*BlockMeta, error) {
 	bm.Header = h
 	bm.NumTxs = int(pb.NumTxs)
 
-	return bm, bm.ValidateBasic()
+	return bm, nil
 }
 
 // ValidateBasic performs basic validation.

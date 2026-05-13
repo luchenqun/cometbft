@@ -68,6 +68,7 @@ type Environment struct {
 	// external, thread safe interfaces
 	ProxyAppQuery   proxy.AppConnQuery
 	ProxyAppMempool proxy.AppConnMempool
+	ProxyAppEthQuery proxy.AppConnEthQuery
 
 	// interfaces defined in types and above
 	StateStore       sm.Store

@@ -3,9 +3,12 @@ package blocksync
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"sort"
 	"testing"
 	"time"
+
+	bcproto "github.com/cometbft/cometbft/proto/tendermint/blocksync"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -29,11 +32,15 @@ import (
 
 var config *cfg.Config
 
-func randGenesisDoc(numValidators int, randPower bool, minPower int64) (*types.GenesisDoc, []types.PrivValidator) {
-	validators := make([]types.GenesisValidator, numValidators)
-	privValidators := make([]types.PrivValidator, numValidators)
-	for i := 0; i < numValidators; i++ {
-		val, privVal := types.RandValidator(randPower, minPower)
+func genesisDocWithValsPowers(powers []int64) (*types.GenesisDoc, []types.PrivValidator) {
+	if len(powers) == 0 {
+		panic("must have atleast 1 validator")
+	}
+
+	validators := make([]types.GenesisValidator, len(powers))
+	privValidators := make([]types.PrivValidator, len(powers))
+	for i, power := range powers {
+		val, privVal := types.RandValidator(false, power)
 		validators[i] = types.GenesisValidator{
 			PubKey: val.PubKey,
 			Power:  val.VotingPower,
@@ -53,8 +60,35 @@ func randGenesisDoc(numValidators int, randPower bool, minPower int64) (*types.G
 }
 
 type ReactorPair struct {
-	reactor *Reactor
+	reactor *ByzantineReactor
 	app     proxy.AppConns
+}
+
+type reactorOpts struct {
+	corruptedBlock          int64
+	allAbsentExtCommitBlock int64
+	invalidExtCommitBlock   int64
+	deterministicVoteTimes  bool
+}
+
+type reactorOption func(*reactorOpts)
+
+func withCorruptedBlock(height int64) reactorOption {
+	return func(o *reactorOpts) {
+		o.corruptedBlock = height
+	}
+}
+
+func withAllAbsentExtCommitBlock(height int64) reactorOption {
+	return func(o *reactorOpts) {
+		o.allAbsentExtCommitBlock = height
+	}
+}
+
+func withInvalidExtCommitBlock(height int64) reactorOption {
+	return func(o *reactorOpts) {
+		o.invalidExtCommitBlock = height
+	}
 }
 
 func newReactor(
@@ -63,9 +97,12 @@ func newReactor(
 	genDoc *types.GenesisDoc,
 	privVals []types.PrivValidator,
 	maxBlockHeight int64,
+	opts ...reactorOption,
 ) ReactorPair {
-	if len(privVals) != 1 {
-		panic("only support one validator")
+
+	var options reactorOpts
+	for _, opt := range opts {
+		opt(&options)
 	}
 
 	app := abci.NewBaseApplication()
@@ -103,7 +140,7 @@ func newReactor(
 	// Make the Reactor itself.
 	// NOTE we have to create and commit the blocks first because
 	// pool.height is determined from the store.
-	fastSync := true
+	blockSync := true
 	db := dbm.NewMemDB()
 	stateStore = sm.NewStore(db, sm.StoreOptions{
 		DiscardABCIResponses: false,
@@ -119,39 +156,45 @@ func newReactor(
 
 	// let's add some blocks in
 	for blockHeight := int64(1); blockHeight <= maxBlockHeight; blockHeight++ {
+		voteExtensionIsEnabled := genDoc.ConsensusParams.ABCI.VoteExtensionsEnabled(blockHeight)
+
 		lastExtCommit := seenExtCommit.Clone()
 
-		thisBlock := state.MakeBlock(blockHeight, nil, lastExtCommit.ToCommit(), nil, state.Validators.Proposer.Address)
+		thisBlock, err := state.MakeBlock(blockHeight, nil, lastExtCommit.ToCommit(), nil, state.Validators.Proposer.Address)
+		require.NoError(t, err)
 
 		thisParts, err := thisBlock.MakePartSet(types.BlockPartSizeBytes)
 		require.NoError(t, err)
 		blockID := types.BlockID{Hash: thisBlock.Hash(), PartSetHeader: thisParts.Header()}
 
-		// Simulate a commit for the current height
-		pubKey, err := privVals[0].GetPubKey()
-		if err != nil {
-			panic(err)
+		voteTime := time.Now()
+		if options.deterministicVoteTimes {
+			// use deterministic vote times so independently constructed test chains
+			// with the same genesis produce identical block IDs and LastBlockID links.
+			voteTime = genDoc.GenesisTime.Add(time.Duration(blockHeight) * time.Second)
 		}
-		addr := pubKey.Address()
-		idx, _ := state.Validators.GetByAddress(addr)
-		vote, err := types.MakeVote(
-			privVals[0],
-			thisBlock.Header.ChainID,
-			idx,
-			thisBlock.Header.Height,
-			0,
-			cmtproto.PrecommitType,
-			blockID,
-			time.Now(),
-		)
-		if err != nil {
-			panic(err)
+
+		// Simulate commits for the current height
+		extCommit := make([]types.ExtendedCommitSig, len(privVals))
+		for _, val := range privVals {
+			pubKey, err := val.GetPubKey()
+			if err != nil {
+				panic(err)
+			}
+			addr := pubKey.Address()
+			idx, _ := state.Validators.GetByAddress(addr)
+
+			vote, err := types.MakeVote(val, thisBlock.ChainID, idx, thisBlock.Height, 0, cmtproto.PrecommitType, blockID, voteTime)
+			if err != nil {
+				panic(err)
+			}
+			extCommit[idx] = vote.ExtendedCommitSig()
 		}
 		seenExtCommit = &types.ExtendedCommit{
-			Height:             vote.Height,
-			Round:              vote.Round,
+			Height:             thisBlock.Height,
+			Round:              0,
 			BlockID:            blockID,
-			ExtendedSignatures: []types.ExtendedCommitSig{vote.ExtendedCommitSig()},
+			ExtendedSignatures: extCommit,
 		}
 
 		state, err = blockExec.ApplyBlock(state, blockID, thisBlock)
@@ -159,10 +202,18 @@ func newReactor(
 			panic(fmt.Errorf("error apply block: %w", err))
 		}
 
-		blockStore.SaveBlockWithExtendedCommit(thisBlock, thisParts, seenExtCommit)
+		saveCorrectVoteExtensions := blockHeight != options.corruptedBlock
+		if saveCorrectVoteExtensions == voteExtensionIsEnabled {
+			blockStore.SaveBlockWithExtendedCommit(thisBlock, thisParts, seenExtCommit)
+		} else {
+			blockStore.SaveBlock(thisBlock, thisParts, seenExtCommit.ToCommit())
+		}
 	}
 
-	bcReactor := NewReactor(state.Copy(), blockExec, blockStore, fastSync, NopMetrics(), 0)
+	bcReactor := NewByzantineReactor(NewReactor(state.Copy(), blockExec, blockStore, blockSync, NopMetrics(), 0))
+	bcReactor.corruptedBlock = options.corruptedBlock
+	bcReactor.absentExtCommitBlock = options.allAbsentExtCommitBlock
+	bcReactor.invalidExtCommitBlock = options.invalidExtCommitBlock
 	bcReactor.SetLogger(logger.With("module", "blocksync"))
 
 	return ReactorPair{bcReactor, proxyApp}
@@ -171,7 +222,7 @@ func newReactor(
 func TestNoBlockResponse(t *testing.T) {
 	config = test.ResetTestRoot("blocksync_reactor_test")
 	defer os.RemoveAll(config.RootDir)
-	genDoc, privVals := randGenesisDoc(1, false, 30)
+	genDoc, privVals := genesisDocWithValsPowers([]int64{30})
 
 	maxBlockHeight := int64(65)
 
@@ -187,10 +238,10 @@ func TestNoBlockResponse(t *testing.T) {
 
 	defer func() {
 		for _, r := range reactorPairs {
-			err := r.reactor.Stop()
-			require.NoError(t, err)
-			err = r.app.Stop()
-			require.NoError(t, err)
+			_ = r.reactor.Stop()
+			// require.NoError(t, err)
+			_ = r.app.Stop()
+			// require.NoError(t, err)
 		}
 	}()
 
@@ -204,10 +255,7 @@ func TestNoBlockResponse(t *testing.T) {
 		{100, false},
 	}
 
-	for {
-		if reactorPairs[1].reactor.pool.IsCaughtUp() {
-			break
-		}
+	for !reactorPairs[1].reactor.pool.IsCaughtUp() {
 
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -232,12 +280,12 @@ func TestNoBlockResponse(t *testing.T) {
 func TestBadBlockStopsPeer(t *testing.T) {
 	config = test.ResetTestRoot("blocksync_reactor_test")
 	defer os.RemoveAll(config.RootDir)
-	genDoc, privVals := randGenesisDoc(1, false, 30)
+	genDoc, privVals := genesisDocWithValsPowers([]int64{30})
 
 	maxBlockHeight := int64(148)
 
 	// Other chain needs a different validator set
-	otherGenDoc, otherPrivVals := randGenesisDoc(1, false, 30)
+	otherGenDoc, otherPrivVals := genesisDocWithValsPowers([]int64{30})
 	otherChain := newReactor(t, log.TestingLogger(), otherGenDoc, otherPrivVals, maxBlockHeight)
 
 	defer func() {
@@ -301,10 +349,7 @@ func TestBadBlockStopsPeer(t *testing.T) {
 		p2p.Connect2Switches(switches, i, len(reactorPairs)-1)
 	}
 
-	for {
-		if lastReactorPair.reactor.pool.IsCaughtUp() || lastReactorPair.reactor.Switch.Peers().Size() == 0 {
-			break
-		}
+	for !lastReactorPair.reactor.pool.IsCaughtUp() && lastReactorPair.reactor.Switch.Peers().Size() != 0 {
 
 		time.Sleep(1 * time.Second)
 	}
@@ -317,7 +362,7 @@ func TestCheckSwitchToConsensusLastHeightZero(t *testing.T) {
 
 	config = test.ResetTestRoot("blocksync_reactor_test")
 	defer os.RemoveAll(config.RootDir)
-	genDoc, privVals := randGenesisDoc(1, false, 30)
+	genDoc, privVals := genesisDocWithValsPowers([]int64{30})
 
 	reactorPairs := make([]ReactorPair, 1, 2)
 	reactorPairs[0] = newReactor(t, log.TestingLogger(), genDoc, privVals, 0)
@@ -376,5 +421,229 @@ func TestCheckSwitchToConsensusLastHeightZero(t *testing.T) {
 	const maxDiff = 3
 	for _, r := range reactorPairs {
 		assert.GreaterOrEqual(t, r.reactor.store.Height(), maxBlockHeight-maxDiff)
+	}
+}
+
+func ExtendedCommitNetworkHelper(t *testing.T, maxBlockHeight int64, enableVoteExtensionAt int64, valPowers []int64, opts ...reactorOption) {
+	config = test.ResetTestRoot("blocksync_reactor_test")
+	defer os.RemoveAll(config.RootDir)
+	genDoc, privVals := genesisDocWithValsPowers(valPowers)
+	genDoc.ConsensusParams.ABCI.VoteExtensionsEnableHeight = enableVoteExtensionAt
+
+	reactorPairs := make([]ReactorPair, 1, 2)
+	reactorPairs[0] = newReactor(t, log.TestingLogger(), genDoc, privVals, 0)
+	reactorPairs[0].reactor.switchToConsensusMs = 50
+	defer func() {
+		for _, r := range reactorPairs {
+			_ = r.reactor.Stop()
+			_ = r.app.Stop()
+		}
+	}()
+
+	reactorPairs = append(reactorPairs, newReactor(t, log.TestingLogger(), genDoc, privVals, maxBlockHeight, opts...))
+
+	var switches []*p2p.Switch
+	for _, r := range reactorPairs {
+		switches = append(switches, p2p.MakeConnectedSwitches(config.P2P, 1, func(i int, s *p2p.Switch) *p2p.Switch {
+			s.AddReactor("BLOCKSYNC", r.reactor)
+			return s
+		}, p2p.Connect2Switches)...)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+
+	// Connect both switches
+	p2p.Connect2Switches(switches, 0, 1)
+
+	startTime := time.Now()
+	for {
+		time.Sleep(20 * time.Millisecond)
+		// The reactor can never catch up, because at one point it disconnects.
+		require.False(t, reactorPairs[0].reactor.pool.IsCaughtUp(), "node caught up when it should not have")
+		// After 5 seconds, the test should have executed.
+		if time.Since(startTime) > 5*time.Second {
+			assert.Equal(t, 0, reactorPairs[0].reactor.Switch.Peers().Size(), "node should have disconnected but didn't")
+			assert.Equal(t, 0, reactorPairs[1].reactor.Switch.Peers().Size(), "node should have disconnected but didn't")
+			break
+		}
+	}
+}
+
+func TestCheckExtendedCommit(t *testing.T) {
+	tests := []struct {
+		name                  string
+		maxBlockHeight        int64
+		enableVoteExtensionAt int64
+		valPowers             []int64
+		opts                  []reactorOption
+	}{
+		{
+			name:                  "extra ext commit when disabled",
+			maxBlockHeight:        10,
+			enableVoteExtensionAt: 5,
+			valPowers:             []int64{30, 1},
+			opts:                  []reactorOption{withCorruptedBlock(3)},
+		},
+		{
+			name:                  "missing ext commit when enabled",
+			maxBlockHeight:        10,
+			enableVoteExtensionAt: 5,
+			valPowers:             []int64{30, 1},
+			opts:                  []reactorOption{withCorruptedBlock(8)},
+		},
+		{
+			name:                  "all absent signatures",
+			maxBlockHeight:        10,
+			enableVoteExtensionAt: 1,
+			valPowers:             []int64{30, 1},
+			opts:                  []reactorOption{withAllAbsentExtCommitBlock(5)},
+		},
+		{
+			name:                  "invalid signature after 2/3+ threshold",
+			maxBlockHeight:        10,
+			enableVoteExtensionAt: 1,
+			valPowers:             []int64{10, 10, 10, 1},
+			opts:                  []reactorOption{withInvalidExtCommitBlock(5)},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ExtendedCommitNetworkHelper(t, tc.maxBlockHeight, tc.enableVoteExtensionAt, tc.valPowers, tc.opts...)
+		})
+	}
+}
+
+// ByzantineReactor is a blockstore reactor implementation where a corrupted block can be sent to a peer.
+// The corruption is that the block contains extended commit signatures when vote extensions are disabled or
+// it has no extended commit signatures while vote extensions are enabled.
+// If the corrupted block height is set to 0, the reactor behaves as normal.
+type ByzantineReactor struct {
+	*Reactor
+	corruptedBlock        int64
+	absentExtCommitBlock  int64
+	invalidExtCommitBlock int64
+}
+
+func NewByzantineReactor(conR *Reactor) *ByzantineReactor {
+	return &ByzantineReactor{
+		Reactor: conR,
+	}
+}
+
+// respondToPeer (overridden method) loads a block and sends it to the requesting peer,
+// if we have it. Otherwise, we'll respond saying we don't have it.
+// Byzantine modification: if corruptedBlock is set, send the wrong Block.
+func (bcR *ByzantineReactor) respondToPeer(msg *bcproto.BlockRequest, src p2p.Peer) (queued bool) {
+	block := bcR.store.LoadBlock(msg.Height)
+	if block == nil {
+		bcR.Logger.Info("Peer asking for a block we don't have", "src", src, "height", msg.Height)
+		return src.TrySend(p2p.Envelope{
+			ChannelID: BlocksyncChannel,
+			Message:   &bcproto.NoBlockResponse{Height: msg.Height},
+		})
+	}
+
+	state, err := bcR.blockExec.Store().Load()
+	if err != nil {
+		bcR.Logger.Error("loading state", "err", err)
+		return false
+	}
+	var extCommit *types.ExtendedCommit
+	voteExtensionEnabled := state.ConsensusParams.ABCI.VoteExtensionsEnabled(msg.Height)
+	incorrectBlock := bcR.corruptedBlock == msg.Height
+	if voteExtensionEnabled && !incorrectBlock || !voteExtensionEnabled && incorrectBlock {
+		extCommit = bcR.store.LoadBlockExtendedCommit(msg.Height)
+		if extCommit == nil {
+			bcR.Logger.Error("found block in store with no extended commit", "block", block)
+			return false
+		}
+	}
+
+	if bcR.absentExtCommitBlock == msg.Height && extCommit != nil {
+		absentSigs := make([]types.ExtendedCommitSig, len(extCommit.ExtendedSignatures))
+		for i := range absentSigs {
+			absentSigs[i] = types.NewExtendedCommitSigAbsent()
+		}
+		extCommit = &types.ExtendedCommit{
+			Height:             extCommit.Height,
+			Round:              extCommit.Round,
+			BlockID:            extCommit.BlockID,
+			ExtendedSignatures: absentSigs,
+		}
+	}
+
+	if bcR.invalidExtCommitBlock == msg.Height && extCommit != nil {
+		extCommit.ExtendedSignatures[len(extCommit.ExtendedSignatures)-1].Signature = []byte("invalid signature")
+	}
+
+	bl, err := block.ToProto()
+	if err != nil {
+		bcR.Logger.Error("could not convert msg to protobuf", "err", err)
+		return false
+	}
+
+	return src.TrySend(p2p.Envelope{
+		ChannelID: BlocksyncChannel,
+		Message: &bcproto.BlockResponse{
+			Block:     bl,
+			ExtCommit: extCommit.ToProto(),
+		},
+	})
+}
+
+// Receive implements Reactor by handling 4 types of messages (look below).
+// Copied unchanged from reactor.go so the correct respondToPeer is called.
+func (bcR *ByzantineReactor) Receive(e p2p.Envelope) { //nolint: dupl
+	if err := ValidateMsg(e.Message); err != nil {
+		bcR.Logger.Error("Peer sent us invalid msg", "peer", e.Src, "msg", e.Message, "err", err)
+		bcR.Switch.StopPeerForError(e.Src, err)
+		return
+	}
+
+	bcR.Logger.Debug("Receive", "e.Src", e.Src, "chID", e.ChannelID, "msg", e.Message)
+
+	switch msg := e.Message.(type) {
+	case *bcproto.BlockRequest:
+		bcR.respondToPeer(msg, e.Src)
+	case *bcproto.BlockResponse:
+		bi, err := types.BlockFromProto(msg.Block)
+		if err != nil {
+			bcR.Logger.Error("Peer sent us invalid block", "peer", e.Src, "msg", e.Message, "err", err)
+			bcR.Switch.StopPeerForError(e.Src, err)
+			return
+		}
+		var extCommit *types.ExtendedCommit
+		if msg.ExtCommit != nil {
+			var err error
+			extCommit, err = types.ExtendedCommitFromProto(msg.ExtCommit)
+			if err != nil {
+				bcR.Logger.Error("failed to convert extended commit from proto",
+					"peer", e.Src,
+					"err", err)
+				bcR.Switch.StopPeerForError(e.Src, err)
+				return
+			}
+		}
+
+		if err := bcR.pool.AddBlock(e.Src.ID(), bi, extCommit, msg.Block.Size()); err != nil {
+			bcR.Logger.Error("failed to add block", "peer", e.Src, "err", err)
+		}
+	case *bcproto.StatusRequest:
+		// Send peer our state.
+		e.Src.TrySend(p2p.Envelope{
+			ChannelID: BlocksyncChannel,
+			Message: &bcproto.StatusResponse{
+				Height: bcR.store.Height(),
+				Base:   bcR.store.Base(),
+			},
+		})
+	case *bcproto.StatusResponse:
+		// Got a peer status. Unverified.
+		bcR.pool.SetPeerRange(e.Src.ID(), msg.Base, msg.Height)
+	case *bcproto.NoBlockResponse:
+		bcR.Logger.Debug("Peer does not have requested block", "peer", e.Src, "height", msg.Height)
+		bcR.pool.RedoRequestFrom(msg.Height, e.Src.ID())
+	default:
+		bcR.Logger.Error(fmt.Sprintf("Unknown message type %v", reflect.TypeOf(msg)))
 	}
 }

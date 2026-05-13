@@ -45,11 +45,11 @@ func NewNetAddress(id ID, addr net.Addr) *NetAddress {
 	if !ok {
 		if flag.Lookup("test.v") == nil { // normal run
 			panic(fmt.Sprintf("Only TCPAddrs are supported. Got: %v", addr))
-		} else { // in testing
-			netAddr := NewNetAddressIPPort(net.IP("127.0.0.1"), 0)
-			netAddr.ID = id
-			return netAddr
 		}
+		// in testing
+		netAddr := NewNetAddressIPPort(net.IP("127.0.0.1"), 0)
+		netAddr.ID = id
+		return netAddr
 	}
 
 	if err := validateID(id); err != nil {
@@ -255,8 +255,7 @@ func (na *NetAddress) Routable() bool {
 		return false
 	}
 	// TODO(oga) bitcoind doesn't include RFC3849 here, but should we?
-	return !(na.RFC1918() || na.RFC3927() || na.RFC4862() ||
-		na.RFC4193() || na.RFC4843() || na.Local())
+	return !na.RFC1918() && !na.RFC3927() && !na.RFC4862() && !na.RFC4193() && !na.RFC4843() && !na.Local()
 }
 
 // For IPv4 these are either a 0 or all bits set address. For IPv6 a zero

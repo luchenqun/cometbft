@@ -17,7 +17,9 @@ import (
 	"github.com/cometbft/cometbft/crypto"
 	"github.com/cometbft/cometbft/crypto/ed25519"
 	"github.com/cometbft/cometbft/crypto/secp256k1"
+	"github.com/cometbft/cometbft/crypto/sr25519"
 	rpchttp "github.com/cometbft/cometbft/rpc/client/http"
+	"github.com/cometbft/cometbft/types"
 
 	_ "embed"
 )
@@ -59,35 +61,42 @@ const (
 	PerturbationRestart    Perturbation = "restart"
 	PerturbationUpgrade    Perturbation = "upgrade"
 
-	EvidenceAgeHeight int64         = 7
-	EvidenceAgeTime   time.Duration = 500 * time.Millisecond
+	EvidenceAgeHeight int64         = 14
+	EvidenceAgeTime   time.Duration = 1500 * time.Millisecond
 )
 
 // Testnet represents a single testnet.
 type Testnet struct {
-	Name                       string
-	File                       string
-	Dir                        string
-	IP                         *net.IPNet
-	InitialHeight              int64
-	InitialState               map[string]string
-	Validators                 map[*Node]int64
-	ValidatorUpdates           map[int64]map[*Node]int64
-	Nodes                      []*Node
-	KeyType                    string
-	Evidence                   int
-	LoadTxSizeBytes            int
-	LoadTxBatchSize            int
-	LoadTxConnections          int
-	ABCIProtocol               string
-	PrepareProposalDelay       time.Duration
-	ProcessProposalDelay       time.Duration
-	CheckTxDelay               time.Duration
-	VoteExtensionDelay         time.Duration
-	FinalizeBlockDelay         time.Duration
-	UpgradeVersion             string
-	Prometheus                 bool
-	VoteExtensionsEnableHeight int64
+	Name                                                 string
+	File                                                 string
+	Dir                                                  string
+	IP                                                   *net.IPNet
+	InitialHeight                                        int64
+	InitialState                                         map[string]string
+	Validators                                           map[*Node]int64
+	ValidatorUpdates                                     map[int64]map[*Node]int64
+	Nodes                                                []*Node
+	KeyType                                              string
+	Evidence                                             int
+	LoadTxSizeBytes                                      int
+	LoadTxBatchSize                                      int
+	LoadTxConnections                                    int
+	LoadMaxTxs                                           int
+	ABCIProtocol                                         string
+	PrepareProposalDelay                                 time.Duration
+	ProcessProposalDelay                                 time.Duration
+	CheckTxDelay                                         time.Duration
+	VoteExtensionDelay                                   time.Duration
+	FinalizeBlockDelay                                   time.Duration
+	UpgradeVersion                                       string
+	LogLevel                                             string
+	LogFormat                                            string
+	Prometheus                                           bool
+	BlockMaxBytes                                        int64
+	VoteExtensionsEnableHeight                           int64
+	VoteExtensionsUpdateHeight                           int64
+	ExperimentalMaxGossipConnectionsToPersistentPeers    uint
+	ExperimentalMaxGossipConnectionsToNonPersistentPeers uint
 }
 
 // Node represents a CometBFT node in a testnet.
@@ -156,6 +165,7 @@ func NewTestnetFromManifest(manifest Manifest, file string, ifd InfrastructureDa
 		LoadTxSizeBytes:            manifest.LoadTxSizeBytes,
 		LoadTxBatchSize:            manifest.LoadTxBatchSize,
 		LoadTxConnections:          manifest.LoadTxConnections,
+		LoadMaxTxs:                 manifest.LoadMaxTxs,
 		ABCIProtocol:               manifest.ABCIProtocol,
 		PrepareProposalDelay:       manifest.PrepareProposalDelay,
 		ProcessProposalDelay:       manifest.ProcessProposalDelay,
@@ -163,8 +173,14 @@ func NewTestnetFromManifest(manifest Manifest, file string, ifd InfrastructureDa
 		VoteExtensionDelay:         manifest.VoteExtensionDelay,
 		FinalizeBlockDelay:         manifest.FinalizeBlockDelay,
 		UpgradeVersion:             manifest.UpgradeVersion,
+		LogLevel:                   manifest.LogLevel,
+		LogFormat:                  manifest.LogFormat,
 		Prometheus:                 manifest.Prometheus,
+		BlockMaxBytes:              manifest.BlockMaxBytes,
 		VoteExtensionsEnableHeight: manifest.VoteExtensionsEnableHeight,
+		VoteExtensionsUpdateHeight: manifest.VoteExtensionsUpdateHeight,
+		ExperimentalMaxGossipConnectionsToPersistentPeers:    manifest.ExperimentalMaxGossipConnectionsToPersistentPeers,
+		ExperimentalMaxGossipConnectionsToNonPersistentPeers: manifest.ExperimentalMaxGossipConnectionsToNonPersistentPeers,
 	}
 	if len(manifest.KeyType) != 0 {
 		testnet.KeyType = manifest.KeyType
@@ -336,6 +352,40 @@ func (t Testnet) Validate() error {
 	}
 	if len(t.Nodes) == 0 {
 		return errors.New("network has no nodes")
+	}
+	if t.BlockMaxBytes > types.MaxBlockSizeBytes {
+		return fmt.Errorf("value of BlockMaxBytes cannot be higher than %d", types.MaxBlockSizeBytes)
+	}
+	if t.VoteExtensionsUpdateHeight < -1 {
+		return fmt.Errorf("value of VoteExtensionsUpdateHeight must be positive, 0 (InitChain), "+
+			"or -1 (Genesis); update height %d", t.VoteExtensionsUpdateHeight)
+	}
+	if t.VoteExtensionsEnableHeight < 0 {
+		return fmt.Errorf("value of VoteExtensionsEnableHeight must be positive, or 0 (disable); "+
+			"enable height %d", t.VoteExtensionsEnableHeight)
+	}
+	if t.VoteExtensionsUpdateHeight > 0 && t.VoteExtensionsUpdateHeight < t.InitialHeight {
+		return fmt.Errorf("a value of VoteExtensionsUpdateHeight greater than 0 "+
+			"must not be less than InitialHeight; "+
+			"update height %d, initial height %d",
+			t.VoteExtensionsUpdateHeight, t.InitialHeight,
+		)
+	}
+	if t.VoteExtensionsEnableHeight > 0 {
+		if t.VoteExtensionsEnableHeight < t.InitialHeight {
+			return fmt.Errorf("a value of VoteExtensionsEnableHeight greater than 0 "+
+				"must not be less than InitialHeight; "+
+				"enable height %d, initial height %d",
+				t.VoteExtensionsEnableHeight, t.InitialHeight,
+			)
+		}
+		if t.VoteExtensionsEnableHeight <= t.VoteExtensionsUpdateHeight {
+			return fmt.Errorf("a value of VoteExtensionsEnableHeight greater than 0 "+
+				"must be greater than VoteExtensionsUpdateHeight; "+
+				"update height %d, enable height %d",
+				t.VoteExtensionsUpdateHeight, t.VoteExtensionsEnableHeight,
+			)
+		}
 	}
 	for _, node := range t.Nodes {
 		if err := node.Validate(t); err != nil {
@@ -568,6 +618,8 @@ func (g *keyGenerator) Generate(keyType string) crypto.PrivKey {
 	switch keyType {
 	case "secp256k1":
 		return secp256k1.GenPrivKeySecp256k1(seed)
+	case "sr25519":
+		return sr25519.GenPrivKeyFromSecret(seed)
 	case "", "ed25519":
 		return ed25519.GenPrivKeyFromSecret(seed)
 	default:

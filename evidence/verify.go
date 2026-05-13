@@ -103,6 +103,7 @@ func (evpool *Pool) verify(evidence types.Evidence) error {
 //     the conflicting header's commit
 //   - 2/3+ of the conflicting validator set correctly signed the conflicting block
 //   - the nodes trusted header at the same height as the conflicting header has a different hash
+//   - all signatures must be checked as this will be used as evidence
 //
 // CONTRACT: must run ValidateBasic() on the evidence before verifying
 //
@@ -120,7 +121,7 @@ func VerifyLightClientAttack(
 	// In the case of lunatic attack there will be a different commonHeader height. Therefore the node perform a single
 	// verification jump between the common header and the conflicting one
 	if commonHeader.Height != e.ConflictingBlock.Height {
-		err := commonVals.VerifyCommitLightTrusting(trustedHeader.ChainID, e.ConflictingBlock.Commit, light.DefaultTrustLevel)
+		err := commonVals.VerifyCommitLightTrustingAllSignatures(trustedHeader.ChainID, e.ConflictingBlock.Commit, light.DefaultTrustLevel)
 		if err != nil {
 			return fmt.Errorf("skipping verification of conflicting block failed: %w", err)
 		}
@@ -132,7 +133,7 @@ func VerifyLightClientAttack(
 	}
 
 	// Verify that the 2/3+ commits from the conflicting validator set were for the conflicting header
-	if err := e.ConflictingBlock.ValidatorSet.VerifyCommitLight(trustedHeader.ChainID, e.ConflictingBlock.Commit.BlockID,
+	if err := e.ConflictingBlock.ValidatorSet.VerifyCommitLightAllSignatures(trustedHeader.ChainID, e.ConflictingBlock.Commit.BlockID,
 		e.ConflictingBlock.Height, e.ConflictingBlock.Commit); err != nil {
 		return fmt.Errorf("invalid commit from conflicting block: %w", err)
 	}
@@ -257,17 +258,31 @@ func validateABCIEvidence(
 	}
 
 	for idx, val := range validators {
-		if !bytes.Equal(ev.ByzantineValidators[idx].Address, val.Address) {
+		evByz := ev.ByzantineValidators[idx]
+		if !bytes.Equal(evByz.Address, val.Address) {
 			return fmt.Errorf(
 				"evidence contained an unexpected byzantine validator address; expected: %v, got: %v",
-				val.Address, ev.ByzantineValidators[idx].Address,
+				val.Address, evByz.Address,
 			)
 		}
 
-		if ev.ByzantineValidators[idx].VotingPower != val.VotingPower {
+		if evByz.VotingPower != val.VotingPower {
 			return fmt.Errorf(
 				"evidence contained unexpected byzantine validator power; expected %d, got %d",
-				val.VotingPower, ev.ByzantineValidators[idx].VotingPower,
+				val.VotingPower, evByz.VotingPower,
+			)
+		}
+
+		// Ensure Address is derived from PubKey to prevent pubkey-swap attacks that
+		// would redirect ABCI misbehavior to an innocent validator (ABCI uses
+		// PubKey.Address(), not the Address field).
+		if evByz.PubKey == nil {
+			return fmt.Errorf("byzantine validator at index %d has nil pubkey", idx)
+		}
+		if !bytes.Equal(evByz.Address, evByz.PubKey.Address()) {
+			return fmt.Errorf(
+				"byzantine validator at index %d has address %X that does not match pubkey address %X",
+				idx, evByz.Address, evByz.PubKey.Address(),
 			)
 		}
 	}

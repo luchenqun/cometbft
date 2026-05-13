@@ -39,6 +39,9 @@ const (
 
 	DefaultNodeKeyName  = "node_key.json"
 	DefaultAddrBookName = "addrbook.json"
+
+	MempoolTypeFlood = "flood"
+	MempoolTypeNop   = "nop"
 )
 
 // NOTE: Most of the structs & relevant comments + the
@@ -114,7 +117,7 @@ func TestConfig() *Config {
 
 // SetRoot sets the RootDir for all Config structs
 func (cfg *Config) SetRoot(root string) *Config {
-	cfg.BaseConfig.RootDir = root
+	cfg.RootDir = root
 	cfg.RPC.RootDir = root
 	cfg.P2P.RootDir = root
 	cfg.Mempool.RootDir = root
@@ -149,6 +152,9 @@ func (cfg *Config) ValidateBasic() error {
 	if err := cfg.Instrumentation.ValidateBasic(); err != nil {
 		return fmt.Errorf("error in [instrumentation] section: %w", err)
 	}
+	if !cfg.Consensus.CreateEmptyBlocks && cfg.Mempool.Type == MempoolTypeNop {
+		return fmt.Errorf("`nop` mempool does not support create_empty_blocks = false")
+	}
 	return nil
 }
 
@@ -162,7 +168,7 @@ func (cfg *Config) CheckDeprecated() []string {
 // BaseConfig
 
 // BaseConfig defines the base configuration for a CometBFT node
-type BaseConfig struct { //nolint: maligned
+type BaseConfig struct {
 
 	// The version of the CometBFT binary that created
 	// or last modified the config file
@@ -386,6 +392,10 @@ type RPCConfig struct {
 	// See https://github.com/tendermint/tendermint/issues/3435
 	TimeoutBroadcastTxCommit time.Duration `mapstructure:"timeout_broadcast_tx_commit"`
 
+	// Maximum number of requests that can be sent in a batch
+	// https://www.jsonrpc.org/specification#batch
+	MaxRequestBatchSize int `mapstructure:"max_request_batch_size"`
+
 	// Maximum size of request body, in bytes
 	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
 
@@ -434,8 +444,9 @@ func DefaultRPCConfig() *RPCConfig {
 		TimeoutBroadcastTxCommit:  10 * time.Second,
 		WebSocketWriteBufferSize:  defaultSubscriptionBufferSize,
 
-		MaxBodyBytes:   int64(1000000), // 1MB
-		MaxHeaderBytes: 1 << 20,        // same as the net/http default
+		MaxRequestBatchSize: 10,             // maximum requests in a JSON-RPC batch request
+		MaxBodyBytes:        int64(1000000), // 1MB
+		MaxHeaderBytes:      1 << 20,        // same as the net/http default
 
 		TLSCertFile: "",
 		TLSKeyFile:  "",
@@ -481,6 +492,9 @@ func (cfg *RPCConfig) ValidateBasic() error {
 	if cfg.TimeoutBroadcastTxCommit < 0 {
 		return errors.New("timeout_broadcast_tx_commit can't be negative")
 	}
+	if cfg.MaxRequestBatchSize < 0 {
+		return errors.New("max_request_batch_size can't be negative")
+	}
 	if cfg.MaxBodyBytes < 0 {
 		return errors.New("max_body_bytes can't be negative")
 	}
@@ -523,7 +537,7 @@ func (cfg RPCConfig) IsTLSEnabled() bool {
 // P2PConfig
 
 // P2PConfig defines the configuration options for the CometBFT peer-to-peer networking layer
-type P2PConfig struct { //nolint: maligned
+type P2PConfig struct {
 	RootDir string `mapstructure:"home"`
 
 	// Address to listen for incoming connections
@@ -593,7 +607,7 @@ type P2PConfig struct { //nolint: maligned
 	// Testing params.
 	// Force dial to fail
 	TestDialFail bool `mapstructure:"test_dial_fail"`
-	// FUzz connection
+	// Fuzz connection
 	TestFuzz       bool            `mapstructure:"test_fuzz"`
 	TestFuzzConfig *FuzzConnConfig `mapstructure:"test_fuzz_config"`
 }
@@ -694,6 +708,15 @@ func DefaultFuzzConnConfig() *FuzzConnConfig {
 // implementation (previously called v0), and a prioritized mempool (v1), which
 // was removed (see https://github.com/cometbft/cometbft/issues/260).
 type MempoolConfig struct {
+	// The type of mempool for this node to use.
+	//
+	//  Possible types:
+	//  - "flood" : concurrent linked list mempool with flooding gossip protocol
+	//  (default)
+	//  - "nop"   : nop-mempool (short for no operation; the ABCI app is
+	//  responsible for storing, disseminating and proposing txs).
+	//  "create_empty_blocks=false" is not supported.
+	Type string `mapstructure:"type"`
 	// RootDir is the root directory for all data. This should be configured via
 	// the $CMTHOME env variable or --home cmd flag rather than overriding this
 	// struct field.
@@ -704,6 +727,16 @@ type MempoolConfig struct {
 	// mempool may become invalid. If this does not apply to your application,
 	// you can disable rechecking.
 	Recheck bool `mapstructure:"recheck"`
+	// RecheckTimeout is the time the application has during the rechecking process
+	// to return CheckTx responses, once all requests have been sent. Responses that
+	// arrive after the timeout expires are discarded. It only applies to
+	// non-local ABCI clients and when recheck is enabled.
+	//
+	// The ideal value will strongly depend on the application. It could roughly be estimated as the
+	// average size of the mempool multiplied by the average time it takes the application to validate one
+	// transaction. We consider that the ABCI application runs in the same location as the CometBFT binary
+	// so that the recheck duration is not affected by network delays when making requests and receiving responses.
+	RecheckTimeout time.Duration `mapstructure:"recheck_timeout"`
 	// Broadcast (default: true) defines whether the mempool should relay
 	// transactions to other peers. Setting this to false will stop the mempool
 	// from relaying transactions to other peers until they are included in a
@@ -734,20 +767,38 @@ type MempoolConfig struct {
 	// Including space needed by encoding (one varint per transaction).
 	// XXX: Unused due to https://github.com/tendermint/tendermint/issues/5796
 	MaxBatchBytes int `mapstructure:"max_batch_bytes"`
+	// Experimental parameters to limit gossiping txs to up to the specified number of peers.
+	// We use two independent upper values for persistent and non-persistent peers.
+	// Unconditional peers are not affected by this feature.
+	// If we are connected to more than the specified number of persistent peers, only send txs to
+	// ExperimentalMaxGossipConnectionsToPersistentPeers of them. If one of those
+	// persistent peers disconnects, activate another persistent peer.
+	// Similarly for non-persistent peers, with an upper limit of
+	// ExperimentalMaxGossipConnectionsToNonPersistentPeers.
+	// If set to 0, the feature is disabled for the corresponding group of peers, that is, the
+	// number of active connections to that group of peers is not bounded.
+	// For non-persistent peers, if enabled, a value of 10 is recommended based on experimental
+	// performance results using the default P2P configuration.
+	ExperimentalMaxGossipConnectionsToPersistentPeers    int `mapstructure:"experimental_max_gossip_connections_to_persistent_peers"`
+	ExperimentalMaxGossipConnectionsToNonPersistentPeers int `mapstructure:"experimental_max_gossip_connections_to_non_persistent_peers"`
 }
 
 // DefaultMempoolConfig returns a default configuration for the CometBFT mempool
 func DefaultMempoolConfig() *MempoolConfig {
 	return &MempoolConfig{
-		Recheck:   true,
-		Broadcast: true,
-		WalPath:   "",
+		Type:           MempoolTypeFlood,
+		Recheck:        true,
+		RecheckTimeout: 1000 * time.Millisecond,
+		Broadcast:      true,
+		WalPath:        "",
 		// Each signature verification takes .5ms, Size reduced until we implement
 		// ABCI Recheck
 		Size:        5000,
 		MaxTxsBytes: 1024 * 1024 * 1024, // 1GB
 		CacheSize:   10000,
 		MaxTxBytes:  1024 * 1024, // 1MB
+		ExperimentalMaxGossipConnectionsToNonPersistentPeers: 0,
+		ExperimentalMaxGossipConnectionsToPersistentPeers:    0,
 	}
 }
 
@@ -771,6 +822,12 @@ func (cfg *MempoolConfig) WalEnabled() bool {
 // ValidateBasic performs basic validation (checking param bounds, etc.) and
 // returns an error if any check fails.
 func (cfg *MempoolConfig) ValidateBasic() error {
+	switch cfg.Type {
+	case MempoolTypeFlood, MempoolTypeNop:
+	case "": // allow empty string to be backwards compatible
+	default:
+		return fmt.Errorf("unknown mempool type: %q", cfg.Type)
+	}
 	if cfg.Size < 0 {
 		return errors.New("size can't be negative")
 	}
@@ -782,6 +839,12 @@ func (cfg *MempoolConfig) ValidateBasic() error {
 	}
 	if cfg.MaxTxBytes < 0 {
 		return errors.New("max_tx_bytes can't be negative")
+	}
+	if cfg.ExperimentalMaxGossipConnectionsToPersistentPeers < 0 {
+		return errors.New("experimental_max_gossip_connections_to_persistent_peers can't be negative")
+	}
+	if cfg.ExperimentalMaxGossipConnectionsToNonPersistentPeers < 0 {
+		return errors.New("experimental_max_gossip_connections_to_non_persistent_peers can't be negative")
 	}
 	return nil
 }
@@ -800,6 +863,7 @@ type StateSyncConfig struct {
 	DiscoveryTime       time.Duration `mapstructure:"discovery_time"`
 	ChunkRequestTimeout time.Duration `mapstructure:"chunk_request_timeout"`
 	ChunkFetchers       int32         `mapstructure:"chunk_fetchers"`
+	MaxSnapshotChunks   uint32        `mapstructure:"max_snapshot_chunks"`
 }
 
 func (cfg *StateSyncConfig) TrustHashBytes() []byte {
@@ -818,6 +882,7 @@ func DefaultStateSyncConfig() *StateSyncConfig {
 		DiscoveryTime:       15 * time.Second,
 		ChunkRequestTimeout: 10 * time.Second,
 		ChunkFetchers:       4,
+		MaxSnapshotChunks:   100000,
 	}
 }
 
@@ -870,6 +935,10 @@ func (cfg *StateSyncConfig) ValidateBasic() error {
 
 		if cfg.ChunkFetchers <= 0 {
 			return errors.New("chunk_fetchers is required")
+		}
+
+		if cfg.MaxSnapshotChunks == 0 {
+			return errors.New("max_snapshot_chunks is required")
 		}
 	}
 
@@ -948,6 +1017,9 @@ type ConsensusConfig struct {
 	PeerQueryMaj23SleepDuration time.Duration `mapstructure:"peer_query_maj23_sleep_duration"`
 
 	DoubleSignCheckHeight int64 `mapstructure:"double_sign_check_height"`
+
+	// BlockTimeTolerance is the maximum allowed difference between the proposed block time and wall-clock time.
+	BlockTimeTolerance time.Duration `mapstructure:"block_time_tolerance"`
 }
 
 // DefaultConsensusConfig returns a default configuration for the consensus service
@@ -967,6 +1039,7 @@ func DefaultConsensusConfig() *ConsensusConfig {
 		PeerGossipSleepDuration:     100 * time.Millisecond,
 		PeerQueryMaj23SleepDuration: 2000 * time.Millisecond,
 		DoubleSignCheckHeight:       int64(0),
+		BlockTimeTolerance:          60 * time.Second,
 	}
 }
 
@@ -1068,6 +1141,9 @@ func (cfg *ConsensusConfig) ValidateBasic() error {
 	}
 	if cfg.DoubleSignCheckHeight < 0 {
 		return errors.New("double_sign_check_height can't be negative")
+	}
+	if cfg.BlockTimeTolerance <= 0 {
+		return errors.New("block_time_tolerance must be positive")
 	}
 	return nil
 }

@@ -51,7 +51,12 @@ be done multiple times.
 // RollbackState takes the state at the current height n and overwrites it with the state
 // at height n - 1. Note state here refers to CometBFT state not application state.
 // Returns the latest state height and app hash alongside an error if there was one.
-func RollbackState(config *cfg.Config, removeBlock bool) (int64, []byte, error) {
+func RollbackState(config *cfg.Config, removeBlock bool, rollbackBlocks ...int64) (int64, []byte, error) {
+	steps := int64(1)
+	if len(rollbackBlocks) > 0 && rollbackBlocks[0] > 0 {
+		steps = rollbackBlocks[0]
+	}
+
 	// use the parsed config to load the block and state store
 	blockStore, stateStore, err := loadStateAndBlockStore(config)
 	if err != nil {
@@ -62,8 +67,18 @@ func RollbackState(config *cfg.Config, removeBlock bool) (int64, []byte, error) 
 		_ = stateStore.Close()
 	}()
 
-	// rollback the last state
-	return state.Rollback(blockStore, stateStore, removeBlock)
+	var (
+		height int64
+		hash   []byte
+	)
+	for i := int64(0); i < steps; i++ {
+		height, hash, err = state.Rollback(blockStore, stateStore, removeBlock)
+		if err != nil {
+			return -1, nil, err
+		}
+	}
+
+	return height, hash, nil
 }
 
 func loadStateAndBlockStore(config *cfg.Config) (*store.BlockStore, state.Store, error) {

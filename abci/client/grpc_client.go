@@ -179,6 +179,17 @@ func (cli *grpcClient) finishAsyncCall(req *types.Request, res *types.Response) 
 	return reqres
 }
 
+func (cli *grpcClient) finishSyncCall(reqres *ReqRes) *types.Response {
+	var once sync.Once
+	ch := make(chan *types.Response, 1)
+	reqres.SetCallback(func(res *types.Response) {
+		once.Do(func() {
+			ch <- res
+		})
+	})
+	return <-ch
+}
+
 //----------------------------------------
 
 func (cli *grpcClient) Flush(ctx context.Context) error {
@@ -244,4 +255,25 @@ func (cli *grpcClient) VerifyVoteExtension(ctx context.Context, req *types.Reque
 
 func (cli *grpcClient) FinalizeBlock(ctx context.Context, req *types.RequestFinalizeBlock) (*types.ResponseFinalizeBlock, error) {
 	return cli.client.FinalizeBlock(ctx, types.ToRequestFinalizeBlock(req).GetFinalizeBlock(), grpc.WaitForReady(true))
+}
+
+func (cli *grpcClient) EthQueryAsync(ctx context.Context, req *types.RequestEthQuery) (*ReqRes, error) {
+	res, err := cli.client.EthQuery(ctx, types.ToRequestEthQuery(req).GetEthQuery(), grpc.WaitForReady(true))
+	if err != nil {
+		cli.StopForError(err)
+		return nil, err
+	}
+	return cli.finishAsyncCall(types.ToRequestEthQuery(req), &types.Response{Value: &types.Response_EthQuery{EthQuery: res}}), nil
+}
+
+func (cli *grpcClient) EthQuerySync(ctx context.Context, req *types.RequestEthQuery) (*types.ResponseEthQuery, error) {
+	reqres, err := cli.EthQueryAsync(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return cli.finishSyncCall(reqres).GetEthQuery(), cli.Error()
+}
+
+func (cli *grpcClient) EthQuery(ctx context.Context, req *types.RequestEthQuery) (*types.ResponseEthQuery, error) {
+	return cli.EthQuerySync(ctx, req)
 }

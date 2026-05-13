@@ -151,7 +151,7 @@ func TestWALCrash(t *testing.T) {
 	}
 
 	for i, tc := range testCases {
-		tc := tc
+
 		consensusReplayConfig := ResetConfig(fmt.Sprintf("%s_%d", t.Name(), i))
 		t.Run(tc.name, func(t *testing.T) {
 			crashWALandCheckLiveness(t, consensusReplayConfig, tc.initFn, tc.heightToStop)
@@ -898,7 +898,10 @@ func makeBlocks(n int, state sm.State, privVals []types.PrivValidator) ([]*types
 		if err != nil {
 			return nil, err
 		}
-		block := state.MakeBlock(height, test.MakeNTxs(height, 10), lastCommit, nil, state.LastValidators.Proposer.Address)
+		block, err := state.MakeBlock(height, test.MakeNTxs(height, 10), lastCommit, nil, state.LastValidators.Proposer.Address)
+		if err != nil {
+			return nil, err
+		}
 		blocks[i] = block
 		state.LastBlockID = blockID
 		state.LastBlockHeight = height

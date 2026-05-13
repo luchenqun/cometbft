@@ -11,6 +11,7 @@ import (
 	gogotypes "github.com/cosmos/gogoproto/types"
 
 	"github.com/cometbft/cometbft/crypto"
+	"github.com/cometbft/cometbft/crypto/ed25519"
 	"github.com/cometbft/cometbft/crypto/merkle"
 	"github.com/cometbft/cometbft/crypto/tmhash"
 	"github.com/cometbft/cometbft/libs/bits"
@@ -43,10 +44,11 @@ const (
 type Block struct {
 	mtx cmtsync.Mutex
 
-	Header     `json:"header"`
-	Data       `json:"data"`
-	Evidence   EvidenceData `json:"evidence"`
-	LastCommit *Commit      `json:"last_commit"`
+	verifiedHash cmtbytes.HexBytes // Verified block hash (not included in the struct hash)
+	Header       `json:"header"`
+	Data         `json:"data"`
+	Evidence     EvidenceData `json:"evidence"`
+	LastCommit   *Commit      `json:"last_commit"`
 }
 
 // ValidateBasic performs basic validation that doesn't involve state data.
@@ -130,8 +132,13 @@ func (b *Block) Hash() cmtbytes.HexBytes {
 	if b.LastCommit == nil {
 		return nil
 	}
+	if b.verifiedHash != nil {
+		return b.verifiedHash
+	}
 	b.fillHeader()
-	return b.Header.Hash()
+	hash := b.Header.Hash()
+	b.verifiedHash = hash
+	return hash
 }
 
 // MakePartSet returns a PartSet containing parts of a serialized block.
@@ -347,6 +354,7 @@ type Header struct {
 	// consensus info
 	EvidenceHash    cmtbytes.HexBytes `json:"evidence_hash"`    // evidence included in the block
 	ProposerAddress Address           `json:"proposer_address"` // original proposer of the block
+	RandaoMix       cmtbytes.HexBytes `json:"randao_mix"`       // randao mix
 }
 
 // Populate the Header with state-derived data.
@@ -411,6 +419,10 @@ func (h Header) ValidateBasic() error {
 		)
 	}
 
+	if len(h.RandaoMix) > 0 && len(h.RandaoMix) != ed25519.SignatureSize {
+		return fmt.Errorf("wrong RandaoMix, length is wrong")
+	}
+
 	// Basic validation of hashes related to application data.
 	// Will validate fully against state in state#ValidateBlock.
 	if err := ValidateHash(h.ValidatorsHash); err != nil {
@@ -470,6 +482,7 @@ func (h *Header) Hash() cmtbytes.HexBytes {
 		cdcEncode(h.LastResultsHash),
 		cdcEncode(h.EvidenceHash),
 		cdcEncode(h.ProposerAddress),
+		cdcEncode(h.RandaoMix),
 	})
 }
 
@@ -493,6 +506,7 @@ func (h *Header) StringIndented(indent string) string {
 %s  Results:        %v
 %s  Evidence:       %v
 %s  Proposer:       %v
+%s  RandaoMix:      %v
 %s}#%v`,
 		indent, h.Version,
 		indent, h.ChainID,
@@ -508,6 +522,7 @@ func (h *Header) StringIndented(indent string) string {
 		indent, h.LastResultsHash,
 		indent, h.EvidenceHash,
 		indent, h.ProposerAddress,
+		indent, h.RandaoMix,
 		indent, h.Hash(),
 	)
 }
@@ -533,6 +548,7 @@ func (h *Header) ToProto() *cmtproto.Header {
 		LastResultsHash:    h.LastResultsHash,
 		LastCommitHash:     h.LastCommitHash,
 		ProposerAddress:    h.ProposerAddress,
+		RandaoMix:          h.RandaoMix,
 	}
 }
 
@@ -565,6 +581,7 @@ func HeaderFromProto(ph *cmtproto.Header) (Header, error) {
 	h.LastResultsHash = ph.LastResultsHash
 	h.LastCommitHash = ph.LastCommitHash
 	h.ProposerAddress = ph.ProposerAddress
+	h.RandaoMix = ph.RandaoMix
 
 	return *h, h.ValidateBasic()
 }
@@ -847,6 +864,15 @@ type Commit struct {
 	// NOTE: can't memoize in constructor because constructor isn't used for
 	// unmarshaling.
 	hash cmtbytes.HexBytes
+}
+
+// Clone creates a deep copy of this commit.
+func (commit *Commit) Clone() *Commit {
+	sigs := make([]CommitSig, len(commit.Signatures))
+	copy(sigs, commit.Signatures)
+	commCopy := *commit
+	commCopy.Signatures = sigs
+	return &commCopy
 }
 
 // GetVote converts the CommitSig for the given valIdx to a Vote. Commits do
@@ -1173,12 +1199,12 @@ func (ec *ExtendedCommit) Size() int {
 // Implements VoteSetReader.
 func (ec *ExtendedCommit) BitArray() *bits.BitArray {
 	if ec.bitArray == nil {
-		ec.bitArray = bits.NewBitArray(len(ec.ExtendedSignatures))
-		for i, extCommitSig := range ec.ExtendedSignatures {
+		initialBitFn := func(i int) bool {
 			// TODO: need to check the BlockID otherwise we could be counting conflicts,
 			//       not just the one with +2/3 !
-			ec.bitArray.SetIndex(i, extCommitSig.BlockIDFlag != BlockIDFlagAbsent)
+			return ec.ExtendedSignatures[i].BlockIDFlag != BlockIDFlagAbsent
 		}
+		ec.bitArray = bits.NewBitArrayFromFn(len(ec.ExtendedSignatures), initialBitFn)
 	}
 	return ec.bitArray
 }
