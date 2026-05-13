@@ -11,6 +11,7 @@ import (
 	gogotypes "github.com/cosmos/gogoproto/types"
 
 	"github.com/cometbft/cometbft/crypto"
+	"github.com/cometbft/cometbft/crypto/ed25519"
 	"github.com/cometbft/cometbft/crypto/merkle"
 	"github.com/cometbft/cometbft/crypto/tmhash"
 	"github.com/cometbft/cometbft/libs/bits"
@@ -353,6 +354,7 @@ type Header struct {
 	// consensus info
 	EvidenceHash    cmtbytes.HexBytes `json:"evidence_hash"`    // evidence included in the block
 	ProposerAddress Address           `json:"proposer_address"` // original proposer of the block
+	RandaoMix       cmtbytes.HexBytes `json:"randao_mix"`       // randao mix
 }
 
 // Populate the Header with state-derived data.
@@ -417,6 +419,10 @@ func (h Header) ValidateBasic() error {
 		)
 	}
 
+	if len(h.RandaoMix) > 0 && len(h.RandaoMix) != ed25519.SignatureSize {
+		return fmt.Errorf("wrong RandaoMix, length is wrong")
+	}
+
 	// Basic validation of hashes related to application data.
 	// Will validate fully against state in state#ValidateBlock.
 	if err := ValidateHash(h.ValidatorsHash); err != nil {
@@ -476,6 +482,7 @@ func (h *Header) Hash() cmtbytes.HexBytes {
 		cdcEncode(h.LastResultsHash),
 		cdcEncode(h.EvidenceHash),
 		cdcEncode(h.ProposerAddress),
+		cdcEncode(h.RandaoMix),
 	})
 }
 
@@ -499,6 +506,7 @@ func (h *Header) StringIndented(indent string) string {
 %s  Results:        %v
 %s  Evidence:       %v
 %s  Proposer:       %v
+%s  RandaoMix:      %v
 %s}#%v`,
 		indent, h.Version,
 		indent, h.ChainID,
@@ -514,6 +522,7 @@ func (h *Header) StringIndented(indent string) string {
 		indent, h.LastResultsHash,
 		indent, h.EvidenceHash,
 		indent, h.ProposerAddress,
+		indent, h.RandaoMix,
 		indent, h.Hash(),
 	)
 }
@@ -539,6 +548,7 @@ func (h *Header) ToProto() *cmtproto.Header {
 		LastResultsHash:    h.LastResultsHash,
 		LastCommitHash:     h.LastCommitHash,
 		ProposerAddress:    h.ProposerAddress,
+		RandaoMix:          h.RandaoMix,
 	}
 }
 
@@ -571,6 +581,7 @@ func HeaderFromProto(ph *cmtproto.Header) (Header, error) {
 	h.LastResultsHash = ph.LastResultsHash
 	h.LastCommitHash = ph.LastCommitHash
 	h.ProposerAddress = ph.ProposerAddress
+	h.RandaoMix = ph.RandaoMix
 
 	return *h, h.ValidateBasic()
 }

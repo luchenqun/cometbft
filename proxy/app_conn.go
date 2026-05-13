@@ -10,7 +10,7 @@ import (
 	"github.com/cometbft/cometbft/abci/types"
 )
 
-//go:generate ../scripts/mockery_generate.sh AppConnConsensus|AppConnMempool|AppConnQuery|AppConnSnapshot
+//go:generate ../scripts/mockery_generate.sh AppConnConsensus|AppConnMempool|AppConnQuery|AppConnSnapshot|AppConnEthQuery
 
 //----------------------------------------------------------------------------------------
 // Enforce which abci msgs can be sent on a connection at the type level
@@ -50,6 +50,12 @@ type AppConnSnapshot interface {
 	OfferSnapshot(context.Context, *types.RequestOfferSnapshot) (*types.ResponseOfferSnapshot, error)
 	LoadSnapshotChunk(context.Context, *types.RequestLoadSnapshotChunk) (*types.ResponseLoadSnapshotChunk, error)
 	ApplySnapshotChunk(context.Context, *types.RequestApplySnapshotChunk) (*types.ResponseApplySnapshotChunk, error)
+}
+
+type AppConnEthQuery interface {
+	Error() error
+
+	EthQuerySync(context.Context, *types.RequestEthQuery) (*types.ResponseEthQuery, error)
 }
 
 //-----------------------------------------------------------------------------------------
@@ -218,6 +224,24 @@ func (app *appConnSnapshot) LoadSnapshotChunk(ctx context.Context, req *types.Re
 func (app *appConnSnapshot) ApplySnapshotChunk(ctx context.Context, req *types.RequestApplySnapshotChunk) (*types.ResponseApplySnapshotChunk, error) {
 	defer addTimeSample(app.metrics.MethodTimingSeconds.With("method", "apply_snapshot_chunk", "type", "sync"))()
 	return app.appConn.ApplySnapshotChunk(ctx, req)
+}
+
+type appConnEthQuery struct {
+	appConn abcicli.Client
+}
+
+func NewAppConnEthQuery(appConn abcicli.Client) AppConnEthQuery {
+	return &appConnEthQuery{
+		appConn: appConn,
+	}
+}
+
+func (app *appConnEthQuery) Error() error {
+	return app.appConn.Error()
+}
+
+func (app *appConnEthQuery) EthQuerySync(ctx context.Context, req *types.RequestEthQuery) (*types.ResponseEthQuery, error) {
+	return app.appConn.EthQuerySync(ctx, req)
 }
 
 // addTimeSample returns a function that, when called, adds an observation to m.

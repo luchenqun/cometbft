@@ -234,6 +234,10 @@ type ResultABCIQuery struct {
 	Response abci.ResponseQuery `json:"response"`
 }
 
+type ResultEthQuery struct {
+	Response abci.ResponseEthQuery `json:"response"`
+}
+
 // Result of broadcasting evidence
 type ResultBroadcastEvidence struct {
 	Hash []byte `json:"hash"`

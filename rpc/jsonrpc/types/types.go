@@ -2,14 +2,47 @@ package types
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 
 	cmtjson "github.com/cometbft/cometbft/libs/json"
 )
+
+const (
+	EthBlockNumber         = "eth_blockNumber"
+	EthGetBlockByNumber    = "eth_getBlockByNumber"
+	EthGetBalance          = "eth_getBalance"
+	EthChainID             = "eth_chainId"
+	NetVersion             = "net_version"
+	EthNetworkID           = "eth_networkId"
+	EthGetCode             = "eth_getCode"
+	EthGasPrice            = "eth_gasPrice"
+	EthEstimateGas         = "eth_estimateGas"
+	EthCall                = "eth_call"
+	EthGetTransactionCount = "eth_getTransactionCount"
+	EthSendRawTransaction  = "eth_sendRawTransaction"
+)
+
+var SupportedEthQueryRequests = []string{
+	EthBlockNumber,
+	EthGetBlockByNumber,
+	EthGetBalance,
+	EthChainID,
+	NetVersion,
+	EthNetworkID,
+	EthGetCode,
+	EthGasPrice,
+	EthEstimateGas,
+	EthCall,
+	EthGetTransactionCount,
+	EthSendRawTransaction,
+}
 
 // a wrapper to emulate a sum type: jsonrpcid = string | int
 // TODO: refactor when Go 2.0 arrives https://github.com/golang/go/issues/19412
@@ -199,6 +232,77 @@ func NewRPCSuccessResponse(id jsonrpcid, res interface{}) RPCResponse {
 	return RPCResponse{JSONRPC: "2.0", ID: id, Result: rawMsg}
 }
 
+func NewEthRPCSuccessResponse(id jsonrpcid, res interface{}, method string) RPCResponse {
+	var rawMsg json.RawMessage
+
+	var result []byte
+	if res != nil {
+		js, err := cmtjson.Marshal(res)
+		if err != nil {
+			return RPCInternalError(id, fmt.Errorf("error marshaling response: %w", err))
+		}
+		rawMsg = json.RawMessage(js)
+
+		var v interface{}
+		if err := json.Unmarshal(rawMsg, &v); err != nil {
+			return RPCInternalError(id, fmt.Errorf("error decode response: %w", err))
+		}
+
+		ethResponse := v.(map[string]interface{})["response"]
+		response := ethResponse.(map[string]interface{})["response"]
+		bz, err := base64.StdEncoding.DecodeString(response.(string))
+		if err != nil {
+			return RPCInternalError(id, fmt.Errorf("error decode response: %w", err))
+		}
+		if len(bz) == 0 {
+			bz = []byte{0x0}
+		}
+
+		switch method {
+		case EthBlockNumber, EthNetworkID, EthGetBalance:
+			result, err = json.Marshal("0x" + hex.EncodeToString(bz))
+		case EthChainID:
+			chainIDStr := strings.TrimLeft(hex.EncodeToString(bz), "0")
+			if chainIDStr == "" {
+				chainIDStr = "0"
+			}
+			result, err = json.Marshal("0x" + chainIDStr)
+		case EthGasPrice, EthCall, EthGetCode, EthGetTransactionCount, EthEstimateGas:
+			resultStr := strings.TrimLeft(hex.EncodeToString(bz), "0")
+			if resultStr == "" {
+				resultStr = "0"
+			}
+			result, err = json.Marshal("0x" + resultStr)
+		case EthSendRawTransaction:
+			return RPCInvalidRequestError(id, fmt.Errorf("transfer amoca through EVM wallet on MOCA is not available yet, please go to decellar.io or refer to latest docs"))
+		case NetVersion:
+			hexStr := hex.EncodeToString(bz)
+			netVersion, parseErr := strconv.ParseInt(hexStr, 16, 64)
+			if parseErr != nil {
+				return RPCInternalError(id, fmt.Errorf("error decode response: %w", parseErr))
+			}
+			result, err = json.Marshal(strconv.FormatInt(netVersion, 10))
+		case EthGetBlockByNumber:
+			hexStr := hex.EncodeToString(bz)
+			height, parseErr := strconv.ParseInt(hexStr, 16, 64)
+			if parseErr != nil {
+				return RPCInternalError(id, fmt.Errorf("error decode response: %w", parseErr))
+			}
+			block := formatBlock(height)
+			result, err = json.Marshal(block)
+		default:
+			return RPCInternalError(id, fmt.Errorf("unsupported eth method: %s", method))
+		}
+		if err != nil {
+			return RPCInternalError(id, fmt.Errorf("error decode response: %w", err))
+		}
+	} else {
+		return RPCInternalError(id, fmt.Errorf("empty response"))
+	}
+
+	return RPCResponse{JSONRPC: "2.0", ID: id, Result: result}
+}
+
 func NewRPCErrorResponse(id jsonrpcid, code int, msg string, data string) RPCResponse {
 	return RPCResponse{
 		JSONRPC: "2.0",
@@ -324,4 +428,38 @@ func SocketType(listenAddr string) string {
 		socketType = "tcp"
 	}
 	return socketType
+}
+
+func formatBlock(height int64) map[string]interface{} {
+	parentHeight := height - 1
+	if parentHeight < 0 {
+		parentHeight = 0
+	}
+	heightHex := fmt.Sprintf("0x%x", height)
+	blockHash := fmt.Sprintf("0x%064x", height)
+	parentHash := fmt.Sprintf("0x%064x", parentHeight)
+	zeroHash := "0x" + strings.Repeat("0", 64)
+	zeroAddress := "0x" + strings.Repeat("0", 40)
+
+	return map[string]interface{}{
+		"number":           heightHex,
+		"hash":             blockHash,
+		"parentHash":       parentHash,
+		"nonce":            "0x0000000000000000",
+		"sha3Uncles":       zeroHash,
+		"logsBloom":        "0x" + strings.Repeat("0", 512),
+		"transactionsRoot": zeroHash,
+		"stateRoot":        zeroHash,
+		"receiptsRoot":     zeroHash,
+		"miner":            zeroAddress,
+		"difficulty":       "0x0",
+		"totalDifficulty":  "0x0",
+		"extraData":        "0x",
+		"size":             "0x0",
+		"gasLimit":         "0x0",
+		"gasUsed":          "0x0",
+		"timestamp":        "0x0",
+		"transactions":     []interface{}{},
+		"uncles":           []interface{}{},
+	}
 }

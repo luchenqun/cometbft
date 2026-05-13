@@ -12,6 +12,11 @@ import (
 	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
 )
 
+const (
+	BlsPubKeySize = 128
+	AddressSize   = 20
+)
+
 // Volatile state for each Validator
 // NOTE: The ProposerPriority is not included in Validator.Hash();
 // make sure to update that method if changes are made here
@@ -21,6 +26,8 @@ type Validator struct {
 	VotingPower int64         `json:"voting_power"`
 
 	ProposerPriority int64 `json:"proposer_priority"`
+	BlsKey           []byte `json:"bls_key"`
+	RelayerAddress   []byte `json:"relayer_address"`
 }
 
 // NewValidator returns a new validator with the given pubkey and voting power.
@@ -49,6 +56,12 @@ func (v *Validator) ValidateBasic() error {
 	addr := v.PubKey.Address()
 	if !bytes.Equal(v.Address, addr) {
 		return fmt.Errorf("validator address is incorrectly derived from pubkey. Exp: %v, got %v", addr, v.Address)
+	}
+	if len(v.BlsKey) != 0 && len(v.BlsKey) != BlsPubKeySize {
+		return fmt.Errorf("validator relayer bls key is the wrong size: %v", v.BlsKey)
+	}
+	if len(v.RelayerAddress) != 0 && len(v.RelayerAddress) != AddressSize {
+		return fmt.Errorf("validator relayer address is the wrong size: %v", v.RelayerAddress)
 	}
 
 	return nil
@@ -122,8 +135,10 @@ func (v *Validator) Bytes() []byte {
 	}
 
 	pbv := cmtproto.SimpleValidator{
-		PubKey:      &pk,
-		VotingPower: v.VotingPower,
+		PubKey:         &pk,
+		VotingPower:    v.VotingPower,
+		BlsKey:         v.BlsKey,
+		RelayerAddress: v.RelayerAddress,
 	}
 
 	bz, err := pbv.Marshal()
@@ -149,6 +164,8 @@ func (v *Validator) ToProto() (*cmtproto.Validator, error) {
 		PubKey:           pk,
 		VotingPower:      v.VotingPower,
 		ProposerPriority: v.ProposerPriority,
+		BlsKey:           v.BlsKey,
+		RelayerAddress:   v.RelayerAddress,
 	}
 
 	return &vp, nil
@@ -170,8 +187,18 @@ func ValidatorFromProto(vp *cmtproto.Validator) (*Validator, error) {
 	v.PubKey = pk
 	v.VotingPower = vp.GetVotingPower()
 	v.ProposerPriority = vp.GetProposerPriority()
+	v.BlsKey = vp.GetBlsKey()
+	v.RelayerAddress = vp.GetRelayerAddress()
 
 	return v, nil
+}
+
+func (v *Validator) SetBlsKey(blsKey []byte) {
+	v.BlsKey = blsKey
+}
+
+func (v *Validator) SetRelayerAddress(address []byte) {
+	v.RelayerAddress = address
 }
 
 //----------------------------------------

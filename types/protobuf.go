@@ -35,6 +35,7 @@ func (tm2pb) Header(header *Header) cmtproto.Header {
 
 		EvidenceHash:    header.EvidenceHash,
 		ProposerAddress: header.ProposerAddress,
+		RandaoMix:       header.RandaoMix,
 	}
 }
 
@@ -66,8 +67,10 @@ func (tm2pb) ValidatorUpdate(val *Validator) abci.ValidatorUpdate {
 		panic(err)
 	}
 	return abci.ValidatorUpdate{
-		PubKey: pk,
-		Power:  val.VotingPower,
+		PubKey:         pk,
+		Power:          val.VotingPower,
+		BlsKey:         val.BlsKey,
+		RelayerAddress: val.RelayerAddress,
 	}
 }
 
@@ -107,7 +110,10 @@ func (pb2tm) ValidatorUpdates(vals []abci.ValidatorUpdate) ([]*Validator, error)
 		if err != nil {
 			return nil, err
 		}
-		cmtVals[i] = NewValidator(pub, v.Power)
+		updated := NewValidator(pub, v.Power)
+		updated.SetBlsKey(v.BlsKey)
+		updated.SetRelayerAddress(v.RelayerAddress)
+		cmtVals[i] = updated
 	}
 	return cmtVals, nil
 }

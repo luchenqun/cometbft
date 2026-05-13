@@ -14,6 +14,30 @@ type Application struct {
 	mock.Mock
 }
 
+// EthQuery provides a mock function with given fields: _a0, _a1
+func (_m *Application) EthQuery(_a0 context.Context, _a1 *types.RequestEthQuery) (*types.ResponseEthQuery, error) {
+	ret := _m.Called(_a0, _a1)
+
+	var r0 *types.ResponseEthQuery
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, *types.RequestEthQuery) (*types.ResponseEthQuery, error)); ok {
+		return rf(_a0, _a1)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *types.RequestEthQuery) *types.ResponseEthQuery); ok {
+		r0 = rf(_a0, _a1)
+	} else if ret.Get(0) != nil {
+		r0 = ret.Get(0).(*types.ResponseEthQuery)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *types.RequestEthQuery) error); ok {
+		r1 = rf(_a0, _a1)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
 // ApplySnapshotChunk provides a mock function with given fields: _a0, _a1
 func (_m *Application) ApplySnapshotChunk(_a0 context.Context, _a1 *types.RequestApplySnapshotChunk) (*types.ResponseApplySnapshotChunk, error) {
 	ret := _m.Called(_a0, _a1)

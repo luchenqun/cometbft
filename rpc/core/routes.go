@@ -49,6 +49,9 @@ func (env *Environment) GetRoutes() RoutesMap {
 		"abci_query": rpc.NewRPCFunc(env.ABCIQuery, "path,data,height,prove"),
 		"abci_info":  rpc.NewRPCFunc(env.ABCIInfo, "", rpc.Cacheable()),
 
+		// EVM JSON-RPC API
+		"eth_query": rpc.NewRPCFunc(env.EthQuery, "request"),
+
 		// evidence API
 		"broadcast_evidence": rpc.NewRPCFunc(env.BroadcastEvidence, "evidence"),
 	}

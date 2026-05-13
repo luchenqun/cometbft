@@ -106,6 +106,12 @@ func ToRequestProcessProposal(req *RequestProcessProposal) *Request {
 	}
 }
 
+func ToRequestEthQuery(req *RequestEthQuery) *Request {
+	return &Request{
+		Value: &Request_EthQuery{req},
+	}
+}
+
 func ToRequestExtendVote(req *RequestExtendVote) *Request {
 	return &Request{
 		Value: &Request_ExtendVote{req},
@@ -207,6 +213,12 @@ func ToResponsePrepareProposal(res *ResponsePrepareProposal) *Response {
 func ToResponseProcessProposal(res *ResponseProcessProposal) *Response {
 	return &Response{
 		Value: &Response_ProcessProposal{res},
+	}
+}
+
+func ToResponseEthQuery(res *ResponseEthQuery) *Response {
+	return &Response{
+		Value: &Response_EthQuery{res},
 	}
 }
 

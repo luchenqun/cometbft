@@ -412,6 +412,25 @@ func (cli *socketClient) FinalizeBlock(ctx context.Context, req *types.RequestFi
 	return reqRes.Response.GetFinalizeBlock(), cli.Error()
 }
 
+func (cli *socketClient) EthQueryAsync(ctx context.Context, req *types.RequestEthQuery) (*ReqRes, error) {
+	return cli.queueRequest(ctx, types.ToRequestEthQuery(req))
+}
+
+func (cli *socketClient) EthQuerySync(ctx context.Context, req *types.RequestEthQuery) (*types.ResponseEthQuery, error) {
+	reqRes, err := cli.queueRequest(ctx, types.ToRequestEthQuery(req))
+	if err != nil {
+		return nil, err
+	}
+	if err := cli.Flush(ctx); err != nil {
+		return nil, err
+	}
+	return reqRes.Response.GetEthQuery(), cli.Error()
+}
+
+func (cli *socketClient) EthQuery(ctx context.Context, req *types.RequestEthQuery) (*types.ResponseEthQuery, error) {
+	return cli.EthQuerySync(ctx, req)
+}
+
 func (cli *socketClient) queueRequest(ctx context.Context, req *types.Request) (*ReqRes, error) {
 	reqres := NewReqRes(req)
 
@@ -493,6 +512,8 @@ func resMatchesReq(req *types.Request, res *types.Response) (ok bool) {
 		_, ok = res.Value.(*types.Response_ProcessProposal)
 	case *types.Request_FinalizeBlock:
 		_, ok = res.Value.(*types.Response_FinalizeBlock)
+	case *types.Request_EthQuery:
+		_, ok = res.Value.(*types.Response_EthQuery)
 	}
 	return ok
 }

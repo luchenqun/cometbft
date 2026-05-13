@@ -122,6 +122,7 @@ func (blockExec *BlockExecutor) CreateProposalBlock(
 	}
 
 	maxGas := state.ConsensusParams.Block.MaxGas
+	maxTxs := state.ConsensusParams.Block.MaxTxs
 
 	evidence, evSize := blockExec.evpool.PendingEvidence(state.ConsensusParams.Evidence.MaxBytes)
 
@@ -132,7 +133,7 @@ func (blockExec *BlockExecutor) CreateProposalBlock(
 		maxReapBytes = -1
 	}
 
-	txs := blockExec.mempool.ReapMaxBytesMaxGas(maxReapBytes, maxGas)
+	txs := blockExec.mempool.ReapMaxTxsMaxBytesMaxGas(int(maxTxs), maxReapBytes, maxGas)
 	commit := lastExtCommit.ToCommit()
 	block, err := state.MakeBlock(height, txs, commit, evidence, proposerAddr)
 	if err != nil {

@@ -31,6 +31,7 @@ service ABCI {
       returns (ResponseApplySnapshotChunk);
   rpc PrepareProposal(RequestPrepareProposal) returns (ResponsePrepareProposal);
   rpc ProcessProposal(RequestProcessProposal) returns (ResponseProcessProposal);
+  rpc EthQuery(RequestEthQuery) returns (ResponseEthQuery);
   rpc ExtendVote(RequestExtendVote) returns (ResponseExtendVote);
   rpc VerifyVoteExtension(RequestVerifyVoteExtension) returns (ResponseVerifyVoteExtension);
   rpc FinalizeBlock(RequestFinalizeBlock) returns (ResponseFinalizeBlock);
@@ -57,6 +58,7 @@ message Request {
     RequestExtendVote          extend_vote           = 18;
     RequestVerifyVoteExtension verify_vote_extension = 19;
     RequestFinalizeBlock       finalize_block        = 20;
+    RequestEthQuery            eth_query             = 21;
   }
   reserved 4, 7, 9, 10;  // SetOption, BeginBlock, DeliverTx, EndBlock
 }
@@ -154,6 +156,10 @@ message RequestProcessProposal {
   bytes proposer_address = 8;
 }
 
+message RequestEthQuery {
+  bytes request = 1;
+}
+
 // Extends a vote with application-injected data
 message RequestExtendVote {
   // the hash of the block that this vote may be referring to
@@ -215,6 +221,7 @@ message Response {
     ResponseExtendVote          extend_vote           = 19;
     ResponseVerifyVoteExtension verify_vote_extension = 20;
     ResponseFinalizeBlock       finalize_block        = 21;
+    ResponseEthQuery            eth_query             = 22;
   }
   reserved 5, 8, 10, 11;  // SetOption, BeginBlock, DeliverTx, EndBlock
 }
@@ -331,6 +338,13 @@ message ResponseProcessProposal {
   }
 }
 
+message ResponseEthQuery {
+  uint32 code = 1;
+  string log = 3;
+  string codespace = 4;
+  bytes response = 5;
+}
+
 message ResponseExtendVote {
   bytes vote_extension = 1;
 }
@@ -439,6 +453,8 @@ message Validator {
 message ValidatorUpdate {
   tendermint.crypto.PublicKey pub_key = 1 [(gogoproto.nullable) = false];
   int64                       power   = 2;
+  bytes                       bls_key = 3;
+  bytes                       relayer_address = 4;
 }
 
 message VoteInfo {

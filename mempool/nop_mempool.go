@@ -31,6 +31,9 @@ func (*NopMempool) RemoveTxByKey(types.TxKey) error { return errNotAllowed }
 // ReapMaxBytesMaxGas always returns nil.
 func (*NopMempool) ReapMaxBytesMaxGas(int64, int64) types.Txs { return nil }
 
+// ReapMaxTxsMaxBytesMaxGas always returns nil.
+func (*NopMempool) ReapMaxTxsMaxBytesMaxGas(int, int64, int64) types.Txs { return nil }
+
 // ReapMaxTxs always returns nil.
 func (*NopMempool) ReapMaxTxs(int) types.Txs { return nil }
 
